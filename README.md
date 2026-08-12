@@ -138,6 +138,7 @@ stock-monitor/
 | `GET /api/search?q=` | 智能搜索 |
 | `GET /api/quotes?codes=` | 批量取实时价（6 位代码或腾讯符号，逗号分隔），供持仓模块计算盈亏 |
 | `GET /api/news?src=sina\|em` | 市场资讯：`sina`=新浪财经快讯；`em`=东方财富公司公告，东财不可达时自动回退新浪公司要闻，保证「公告·要闻」面板在两端机房都有内容 |
+| `GET /api/billboard` | 龙虎榜：东方财富每日龙虎榜汇总（上榜股票、原因、涨跌幅、游资/机构净买额），60s 缓存 |
 | `POST /api/add_watch` | 加自选 `{secid}` |
 | `POST /api/remove_watch` | 移除自选 `{secid}` |
 | `POST /api/reorder_watch` | 调整顺序 `{secids:[...]}` |

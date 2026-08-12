@@ -1147,6 +1147,51 @@ def get_news(src="sina"):
     }
 
 
+LHB_URL = ("https://datacenter-web.eastmoney.com/api/data/v1/get"
+           "?reportName=RPT_DAILYBILLBOARD_GENERAL"
+           "&columns=SECURITYCODE,SECURITYNAME,EXPLANATION,CLOSEPRICE,CHANGERATE,TURNOVER,TOTALBUY,TOTALSELL,NETBUY"
+           "&pageSize=15&p=1&sortColumns=NETBUY&sortTypes=-1&source=WEB&client=WEB")
+_billboard_cache = {"ts": 0, "data": None}
+_billboard_ttl = 60
+
+
+def get_billboard():
+    now = time.time()
+    c = _billboard_cache
+    if c["data"] is not None and now - c["ts"] < _billboard_ttl:
+        return c["data"]
+    data, _ = _http_json(LHB_URL, referer="https://data.eastmoney.com/")
+    items = []
+    if data:
+        d = data.get("data") if isinstance(data, dict) else None
+        lst = []
+        if isinstance(d, dict):
+            v = d.get("list")
+            if isinstance(v, list):
+                lst = v
+        elif isinstance(d, list):
+            lst = d
+        for it in lst:
+            if not isinstance(it, dict):
+                continue
+            code = it.get("SECURITYCODE") or it.get("STOCKCODE") or it.get("CODE") or ""
+            name = it.get("SECURITYNAME") or it.get("STOCKNAME") or it.get("NAME") or ""
+            reason = it.get("EXPLANATION") or it.get("REASON") or ""
+            pct = it.get("CHANGERATE")
+            net = it.get("NETBUY") or it.get("BILLBOARD_NET_BUY")
+            buy = it.get("TOTALBUY")
+            sell = it.get("TOTALSELL")
+            close = it.get("CLOSEPRICE")
+            items.append({
+                "code": code, "name": name, "reason": reason,
+                "pct": pct, "net": net, "buy": buy, "sell": sell, "close": close,
+            })
+    res = items if items else None
+    _billboard_cache["ts"] = now
+    _billboard_cache["data"] = res
+    return res
+
+
 # ================================================================
 #  状态聚合
 # ================================================================
@@ -1313,6 +1358,13 @@ class Handler(BaseHTTPRequestHandler):
             src = (qs.get("src") or ["sina"])[0]
             try:
                 self._json(get_news(src))
+            except Exception as e:
+                self._json({"error": str(e)})
+            return
+        if path == "/api/billboard":
+            try:
+                items = get_billboard()
+                self._json({"items": items or [], "error": None if items else "龙虎榜暂不可用（数据源受限）"})
             except Exception as e:
                 self._json({"error": str(e)})
             return

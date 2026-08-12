@@ -239,6 +239,21 @@ window.echarts || document.write('<script src="https://cdn.jsdelivr.net/npm/echa
 
   /* ---------- 市场资讯 ---------- */
   .news-list { display: flex; flex-direction: column; max-height: 340px; overflow: auto; }
+  .duo { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
+  .lhb-list { display: flex; flex-direction: column; gap: 8px; max-height: 360px; overflow: auto; }
+  .lhb-item { padding: 8px 10px; border-radius: 10px; background: var(--panel-2); border: 1px solid var(--border-soft); }
+  .lhb-item .t { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+  .lhb-item .nm { font-weight: 600; font-size: 13.5px; }
+  .lhb-item .pct { font-weight: 700; font-variant-numeric: tabular-nums; }
+  .lhb-item .pct.up { color: #f04142; }
+  .lhb-item .pct.down { color: #16a34a; }
+  .lhb-item .rs { font-size: 12px; color: var(--muted2); margin: 3px 0 4px; line-height: 1.4; }
+  .lhb-item .src { font-size: 12px; color: var(--muted2); }
+  .lhb-item .net { font-weight: 700; font-variant-numeric: tabular-nums; }
+  .lhb-item .net.up { color: #f04142; }
+  .lhb-item .net.down { color: #16a34a; }
+  .lhb-item .code { font-variant-numeric: tabular-nums; }
+  @media (max-width: 860px) { .duo { grid-template-columns: 1fr; } }
   .news-item { display: block; padding: 9px 8px; border-bottom: 1px solid var(--border-soft); text-decoration: none; color: inherit; transition: background .12s; }
   .news-item:last-child { border-bottom: none; }
   .news-item:hover { background: var(--panel2); }
@@ -355,12 +370,21 @@ window.echarts || document.write('<script src="https://cdn.jsdelivr.net/npm/echa
         <div class="rank-list" id="rankList"><div class="empty">加载中…</div></div>
       </div>
 
-      <div class="panel">
-        <div class="panel-head">
-          <h2>全球市场</h2>
-          <span class="hint">美股 / 港股 / 日股 / 韩股</span>
+      <div class="duo">
+        <div class="panel">
+          <div class="panel-head">
+            <h2>龙虎榜</h2>
+            <span class="hint">游资 / 机构动向</span>
+          </div>
+          <div class="lhb-list" id="lhbList"><div class="empty">加载中…</div></div>
         </div>
-        <div id="globalWrap"></div>
+        <div class="panel">
+          <div class="panel-head">
+            <h2>全球市场</h2>
+            <span class="hint">美股 / 港股 / 日股 / 韩股</span>
+          </div>
+          <div id="globalWrap"></div>
+        </div>
       </div>
 
       <div class="panel">
@@ -913,6 +937,38 @@ async function loadNews(src) {
     if (src === curNewsSrc) renderNews(d.items);
   } catch (e) {}
 }
+
+function fmtMoney(v) {
+  if (v == null) return "--";
+  const n = Number(v);
+  if (isNaN(n)) return "--";
+  const a = Math.abs(n);
+  if (a >= 1e8) return (n / 1e8).toFixed(2) + "亿";
+  if (a >= 1e4) return (n / 1e4).toFixed(2) + "万";
+  return n.toFixed(0);
+}
+async function loadBillboard() {
+  try {
+    const r = await fetch("/api/billboard", { cache: "no-store" });
+    const d = await r.json();
+    renderBillboard(d.items || []);
+  } catch (e) {}
+}
+function renderBillboard(items) {
+  const box = document.getElementById("lhbList");
+  if (!items.length) { box.innerHTML = '<div class="empty">龙虎榜暂不可用</div>'; return; }
+  box.innerHTML = items.map(it => {
+    const pct = parseFloat(it.pct);
+    const pc = (pct == null || isNaN(pct)) ? "" : (pct > 0 ? "up" : pct < 0 ? "down" : "");
+    const net = fmtMoney(it.net);
+    const netCls = (it.net == null) ? "" : (it.net > 0 ? "up" : it.net < 0 ? "down" : "");
+    return `<div class="lhb-item">
+      <div class="t"><span class="nm">${it.name || it.code || ""}</span><span class="pct ${pc}">${pct == null ? "" : pct.toFixed(2) + "%"}</span></div>
+      <div class="rs">${it.reason || ""}</div>
+      <div class="t"><span class="src">净买 <span class="net ${netCls}">${net}</span></span><span class="code">${it.code || ""}</span></div>
+    </div>`;
+  }).join("");
+}
 document.querySelectorAll(".newsTab").forEach(t => t.addEventListener("click", () => {
   document.querySelectorAll(".newsTab").forEach(x => x.classList.remove("active"));
   t.classList.add("active");
@@ -1107,12 +1163,13 @@ document.getElementById("refreshBtn").addEventListener("click", load);
   let refreshSec = 3;
   try { const c = await (await fetch("/config.json")).json(); refreshSec = c.refreshSeconds || 3; } catch (e) {}
   load(); loadBoards(); loadBreadth(); loadRank();
-  renderHoldings(); refreshHoldingsQuotes(); loadNews(curNewsSrc);
+  renderHoldings(); refreshHoldingsQuotes(); loadNews(curNewsSrc); loadBillboard();
   setInterval(load, refreshSec * 1000);
-  setInterval(loadBoards, 15000);
-  setInterval(loadBreadth, 15000);
-  setInterval(loadRank, 30000);
-  setInterval(refreshHoldingsQuotes, Math.max(refreshSec, 3) * 1000);
+  setInterval(loadBoards, refreshSec * 1000);
+  setInterval(loadBreadth, refreshSec * 1000);
+  setInterval(loadRank, refreshSec * 1000);
+  setInterval(refreshHoldingsQuotes, refreshSec * 1000);
+  setInterval(loadBillboard, refreshSec * 1000);
   setInterval(() => loadNews(curNewsSrc), 120000);
   window.addEventListener("resize", () => chart && chart.resize());
 })();

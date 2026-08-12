@@ -1014,9 +1014,10 @@ def fetch_user_quotes(codes_str):
 # ================================================================
 
 SINA_NEWS_URL = "https://feed.mix.sina.com.cn/api/roll/get?pageid=153&lid=2509&k=&num=20&page=1"
+SINA_COMPANY_URL = "https://feed.mix.sina.com.cn/api/roll/get?pageid=153&lid=2515&k=&num=20&page=1"
 EM_NOTICE_URL = "https://np-anotice-stock.eastmoney.com/api/notice/query?page_size=20&page_index=1"
 
-_news_cache = {"sina": {"ts": 0, "data": None}, "em": {"ts": 0, "data": None}}
+_news_cache = {"sina": {"ts": 0, "data": None}, "em": {"ts": 0, "data": None}, "sina_co": {"ts": 0, "data": None}}
 _news_ttl = 300
 
 
@@ -1097,13 +1098,49 @@ def get_em_notices():
     return res
 
 
+def get_sina_company_news():
+    """新浪公司/股票要闻（lid=2515），作为东财公告不可达时的兜底源（两端机房均可通）。"""
+    now = time.time()
+    c = _news_cache["sina_co"]
+    if c["data"] is not None and now - c["ts"] < _news_ttl:
+        return c["data"]
+    data, _ = _http_json(SINA_COMPANY_URL, referer="https://finance.sina.com.cn/")
+    items = []
+    if data:
+        d = data.get("result", {}).get("data", [])
+        lst = d.get("list", []) if isinstance(d, dict) else (d if isinstance(d, list) else [])
+        for it in lst:
+            if not isinstance(it, dict):
+                continue
+            ts = it.get("ctime")
+            try:
+                ts = int(ts)
+            except (TypeError, ValueError):
+                ts = 0
+            items.append({
+                "title": it.get("title", ""),
+                "url": it.get("url", ""),
+                "time": ts,
+                "source": it.get("media_name") or it.get("author") or "新浪财经",
+                "intro": (it.get("intro") or it.get("summary") or it.get("brief", ""))[:80],
+            })
+    res = items if items else None
+    _news_cache["sina_co"] = {"ts": now, "data": res}
+    return res
+
+
 def get_news(src="sina"):
     if src == "em":
         items = get_em_notices()
+        real = "em"
+        if not items:                      # 东财公告不可达时，回退新浪公司要闻
+            items = get_sina_company_news()
+            real = "sina_co"
     else:
         items = get_sina_news()
+        real = "sina"
     return {
-        "src": src,
+        "src": real,
         "items": items or [],
         "updated": int(time.time() * 1000),
         "error": None if items else "暂无可用的资讯源（可能受网络限制）",

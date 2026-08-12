@@ -963,6 +963,53 @@ def remove_watch(secid):
 
 
 # ================================================================
+#  用户持仓批量取价（复用腾讯实时行情，供前端持仓模块计算盈亏）
+# ================================================================
+
+def fetch_user_quotes(codes_str):
+    """codes_str: 逗号分隔的 6 位代码或腾讯格式符号（如 600519 / sh600519）。
+    返回 [{code, name, price, prevClose, pct, secid}]，无数据的给 error 字段。
+    仅做展示用取价，不依赖任何配置。
+    """
+    raw = [c.strip() for c in (codes_str or "").split(",") if c.strip()]
+    if not raw:
+        return []
+    tx_map = {}      # tx_symbol -> 原始输入（用于回显 6 位代码）
+    tx_symbols = []
+    for c in raw:
+        if re.match(r'^\d{6}$', c):
+            # 6 位代码 → 腾讯符号（沪 6/9、深 0/3、北交 8/4）
+            if c[0] in ("6", "9"):
+                tx = "sh" + c
+            elif c[0] in ("0", "3"):
+                tx = "sz" + c
+            else:
+                tx = "bj" + c
+            tx_map[tx] = c
+            tx_symbols.append(tx)
+        else:
+            tx_map[c] = c
+            tx_symbols.append(c)
+    result = fetch_quotes_batch(tx_symbols)
+    out = []
+    for tx in tx_symbols:
+        it = result.get(tx)
+        if it and not it.get("error"):
+            out.append({
+                "code": tx_map.get(tx, tx),
+                "name": it.get("name"),
+                "price": it.get("price"),
+                "prevClose": it.get("prevClose"),
+                "pct": it.get("pct"),
+                "secid": tx,
+            })
+        else:
+            out.append({"code": tx_map.get(tx, tx), "name": None,
+                        "price": None, "prevClose": None, "pct": None, "error": "无数据"})
+    return out
+
+
+# ================================================================
 #  状态聚合
 # ================================================================
 
@@ -1112,6 +1159,14 @@ class Handler(BaseHTTPRequestHandler):
             q = (qs.get("q") or [""])[0]
             try:
                 self._json({"q": q, "items": search_stock(q) if q else []})
+            except Exception as e:
+                self._json({"error": str(e)})
+            return
+        if path == "/api/quotes":
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            codes = (qs.get("codes") or [""])[0]
+            try:
+                self._json({"items": fetch_user_quotes(codes)})
             except Exception as e:
                 self._json({"error": str(e)})
             return

@@ -211,6 +211,32 @@ window.echarts || document.write('<script src="https://cdn.jsdelivr.net/npm/echa
     .breadth-wrap { grid-column: span 1; }
     body { padding: 14px; }
   }
+
+  /* ---------- 我的持仓 ---------- */
+  .hold-form { display: flex; gap: 9px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 14px; }
+  .hold-form .fld { display: flex; flex-direction: column; gap: 5px; }
+  .hold-form label { font-size: 11px; color: var(--muted); }
+  .hold-form input { background: var(--panel2); border: 1px solid var(--border); color: var(--text); padding: 8px 10px; border-radius: 9px; font-size: 13px; outline: none; width: 120px; }
+  .hold-form input.code { width: 140px; }
+  .hold-form input:focus { border-color: var(--accent); }
+  .hold-summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 14px; }
+  .hold-stat { background: var(--panel2); border: 1px solid var(--border-soft); border-radius: var(--radius-sm); padding: 11px 13px; }
+  .hold-stat .k { font-size: 11px; color: var(--muted); }
+  .hold-stat .v { font-size: 20px; font-weight: 800; margin-top: 5px; font-variant-numeric: tabular-nums; }
+  .hold-empty { color: var(--muted); padding: 14px; font-size: 13px; }
+
+  /* ---------- 分析报告 ---------- */
+  .rep-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+  .rep-section { margin: 16px 0; }
+  .rep-section h4 { font-size: 14px; margin-bottom: 10px; color: var(--text); display: flex; align-items: center; gap: 8px; }
+  .rep-section h4::before { content: ""; width: 4px; height: 14px; border-radius: 3px; background: var(--accent); display: inline-block; }
+  .rep-list { display: flex; flex-direction: column; gap: 6px; }
+  .rep-row { display: flex; align-items: center; gap: 10px; font-size: 13px; padding: 7px 10px; background: var(--panel2); border-radius: 8px; }
+  .rep-row .nm { font-weight: 600; min-width: 92px; }
+  .rep-row .val { margin-left: auto; text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; white-space: nowrap; }
+  .rep-note { font-size: 12.5px; color: var(--muted); line-height: 1.8; }
+  .rep-disclaimer { font-size: 11.5px; color: var(--muted2); border-top: 1px solid var(--border-soft); padding-top: 12px; margin-top: 8px; line-height: 1.7; }
+  @media (max-width: 1080px) { .hold-summary, .rep-grid { grid-template-columns: repeat(2, 1fr); } }
 </style>
 </head>
 <body>
@@ -328,6 +354,34 @@ window.echarts || document.write('<script src="https://cdn.jsdelivr.net/npm/echa
     </div>
   </div>
 
+  <!-- 我的持仓 -->
+  <div class="panel">
+    <div class="panel-head">
+      <h2>我的持仓</h2>
+      <span class="hint">数据仅存本机浏览器 · 实时算盈亏 · 可生成分析报告</span>
+    </div>
+    <div class="hold-form">
+      <div class="fld"><label>代码 / 名称</label><input id="holdCode" class="code" placeholder="如 600519 或 茅台" /></div>
+      <div class="fld"><label>成本价</label><input id="holdCost" type="number" placeholder="0.00" step="0.01" min="0" /></div>
+      <div class="fld"><label>持仓数量（股）</label><input id="holdQty" type="number" placeholder="0" step="100" min="0" /></div>
+      <div class="fld"><label>备注</label><input id="holdNote" placeholder="可选" /></div>
+      <button class="btn btn-accent" id="holdAdd">+ 添加持仓</button>
+      <button class="btn" id="holdReport">📊 生成分析报告</button>
+    </div>
+    <div class="hold-summary" id="holdSummary"></div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>名称 / 代码</th><th>成本价</th><th>现价</th><th>持仓量</th>
+            <th>市值</th><th>盈亏额</th><th>盈亏%</th><th>仓位占比</th><th></th>
+          </tr>
+        </thead>
+        <tbody id="holdBody"></tbody>
+      </table>
+    </div>
+  </div>
+
   <div class="foot">
     点指数 / 个股名称看 <b>分时 / K线</b>；搜索框可直接加 A股 自选（也可点 ✕ 移除，▲▼ 调顺序）。<br>
     数据源：<b>腾讯财经 qt.gtimg.cn</b>（覆盖 A股 / 美股 / 港股 / 日股 / 韩股），涨跌家数基于 <b>新浪实时行情</b> 逐只统计（真实值，非估算）。<br>
@@ -357,6 +411,17 @@ window.echarts || document.write('<script src="https://cdn.jsdelivr.net/npm/echa
         <span class="tool-hint" id="drawHint"></span>
       </div>
       <div id="chart"></div>
+    </div>
+  </div>
+
+  <!-- Report modal -->
+  <div class="modal-mask" id="repMask">
+    <div class="modal" style="width:min(700px,95vw)">
+      <div class="modal-head">
+        <div class="mt">持仓分析报告</div>
+        <button class="btn" id="closeRep">关闭</button>
+      </div>
+      <div id="repBody" style="max-height:72vh; overflow:auto;"></div>
     </div>
   </div>
 
@@ -799,15 +864,199 @@ document.getElementById("clearLinesBtn").addEventListener("click", function () {
 });
 document.addEventListener("keydown", e => { if (e.key === "Escape" && drawMode) { pendingPoint = null; document.getElementById("drawHint").textContent = "已取消"; if (curType === "kline") renderKline(); } });
 
+// ============ 我的持仓 ============
+const HOLD_KEY = "stockboard_holdings";
+function loadHoldings() {
+  try { return JSON.parse(localStorage.getItem(HOLD_KEY) || "[]"); } catch (e) { return []; }
+}
+function saveHoldings(list) {
+  try { localStorage.setItem(HOLD_KEY, JSON.stringify(list)); } catch (e) {}
+}
+function codeToSecid(code) {
+  if (code[0] === "6" || code[0] === "9") return "1." + code;
+  if (code[0] === "0" || code[0] === "3") return "0." + code;
+  return "TX:bj" + code;
+}
+let holdQuotes = {};   // code -> {price, prevClose, pct, name}
+
+function renderHoldings() {
+  const list = loadHoldings();
+  const body = document.getElementById("holdBody");
+  const sumEl = document.getElementById("holdSummary");
+  let totalMarket = 0, totalCost = 0, win = 0, lose = 0, flat = 0;
+  const rows = list.map(h => {
+    const q = holdQuotes[h.code] || {};
+    const price = (q.price != null) ? q.price : null;
+    const cost = Number(h.cost), qty = Number(h.qty);
+    const market = (price != null) ? price * qty : 0;
+    const costVal = cost * qty;
+    const pnl = market - costVal;
+    const pnlPct = (costVal > 0) ? (pnl / costVal * 100) : null;
+    if (pnl > 0) win++; else if (pnl < 0) lose++; else flat++;
+    totalMarket += market; totalCost += costVal;
+    return Object.assign({}, h, { price, market, costVal, pnl, pnlPct });
+  });
+  rows.forEach(r => { r.weight = totalMarket > 0 ? (r.market / totalMarket * 100) : 0; });
+
+  if (!list.length) {
+    body.innerHTML = '<tr><td colspan="9" class="hold-empty">还没有持仓，上方录入股票代码、成本价和数量即可（数据只存在你本机浏览器，不会上传）。</td></tr>';
+    sumEl.innerHTML = "";
+    return;
+  }
+  body.innerHTML = rows.map(r => {
+    const dc = dirClass(r.pnl), dcP = dirClass(r.pnlPct);
+    return `<tr>
+      <td class="name-cell" data-secid="${r.secid}" data-name="${r.name || r.code}">${r.name || r.code || "--"}<div class="code">${r.code}</div>${r.note ? `<div class="code">${r.note}</div>` : ""}</td>
+      <td>${fmtPrice(r.cost)}</td>
+      <td class="${r.price != null ? dc : ""}">${fmtPrice(r.price)}</td>
+      <td>${Number(r.qty).toLocaleString("zh-CN")}</td>
+      <td>${fmtAmount(r.market)}</td>
+      <td class="${dc}">${fmtChange(r.pnl)}</td>
+      <td class="${dcP}">${fmtPct(r.pnlPct)}</td>
+      <td>${r.weight.toFixed(1)}%</td>
+      <td><span class="rm" data-code="${r.code}" title="删除">✕</span></td>
+    </tr>`;
+  }).join("");
+  body.querySelectorAll(".name-cell").forEach(c => c.addEventListener("click", () => openChart(c.dataset.secid, c.dataset.name)));
+  body.querySelectorAll(".rm").forEach(c => c.addEventListener("click", () => {
+    saveHoldings(loadHoldings().filter(h => h.code !== c.dataset.code));
+    renderHoldings();
+  }));
+
+  const totalPnl = totalMarket - totalCost;
+  const totalPct = totalCost > 0 ? totalPnl / totalCost * 100 : null;
+  const tdc = dirClass(totalPnl);
+  sumEl.innerHTML =
+    `<div class="hold-stat"><div class="k">总市值</div><div class="v">¥${fmtAmount(totalMarket)}</div></div>` +
+    `<div class="hold-stat"><div class="k">总成本</div><div class="v">¥${fmtAmount(totalCost)}</div></div>` +
+    `<div class="hold-stat"><div class="k">总盈亏</div><div class="v ${tdc}">${fmtChange(totalPnl)}</div></div>` +
+    `<div class="hold-stat"><div class="k">收益率 / 胜率</div><div class="v ${tdc}">${fmtPct(totalPct)} <span style="font-size:12px;color:var(--muted)">· ${win}/${list.length}</span></div></div>`;
+}
+
+async function refreshHoldingsQuotes() {
+  const list = loadHoldings();
+  if (!list.length) return;
+  const codes = list.map(h => h.code).join(",");
+  try {
+    const r = await fetch("/api/quotes?codes=" + encodeURIComponent(codes), { cache: "no-store" });
+    const d = await r.json();
+    const byCode = {};
+    (d.items || []).forEach(it => { if (it.code != null) { holdQuotes[it.code] = { price: it.price, prevClose: it.prevClose, pct: it.pct, name: it.name }; byCode[it.code] = it; } });
+    const needName = list.filter(h => !h.name && byCode[h.code] && byCode[h.code].name);
+    if (needName.length) {
+      list.forEach(h => { if (!h.name && byCode[h.code] && byCode[h.code].name) h.name = byCode[h.code].name; });
+      saveHoldings(list);
+    }
+    renderHoldings();
+  } catch (e) {}
+}
+
+async function addHolding() {
+  const codeInput = document.getElementById("holdCode").value.trim();
+  const cost = parseFloat(document.getElementById("holdCost").value);
+  const qty = parseFloat(document.getElementById("holdQty").value);
+  const note = document.getElementById("holdNote").value.trim();
+  if (!codeInput) { alert("请输入代码或名称"); return; }
+  if (!(cost >= 0) || !(qty > 0)) { alert("请填写有效的成本价和数量"); return; }
+  let code = codeInput, name = null;
+  if (/^\d{6}$/.test(codeInput)) {
+    code = codeInput;
+  } else {
+    try {
+      const r = await fetch("/api/search?q=" + encodeURIComponent(codeInput));
+      const d = await r.json();
+      const hit = (d.items || []).find(x => x.secid && (x.secid.startsWith("1.") || x.secid.startsWith("0.")));
+      if (!hit) { alert("没找到该股票，请直接输入 6 位代码"); return; }
+      code = hit.secid.split(".")[1]; name = hit.name;
+    } catch (e) { alert("搜索失败，请直接输入 6 位代码"); return; }
+  }
+  const list = loadHoldings();
+  if (list.find(h => h.code === code)) { alert("该代码已在持仓中"); return; }
+  list.push({ code, name, cost, qty, note, secid: codeToSecid(code) });
+  saveHoldings(list);
+  document.getElementById("holdCode").value = "";
+  document.getElementById("holdCost").value = "";
+  document.getElementById("holdQty").value = "";
+  document.getElementById("holdNote").value = "";
+  renderHoldings(); refreshHoldingsQuotes();
+}
+document.getElementById("holdAdd").addEventListener("click", addHolding);
+document.getElementById("holdReport").addEventListener("click", genReport);
+
+function genReport() {
+  const list = loadHoldings();
+  const rows = list.map(h => {
+    const q = holdQuotes[h.code] || {};
+    const price = (q.price != null) ? q.price : null;
+    const cost = Number(h.cost), qty = Number(h.qty);
+    const market = (price != null) ? price * qty : 0;
+    const costVal = cost * qty;
+    const pnl = market - costVal;
+    const pnlPct = costVal > 0 ? pnl / costVal * 100 : null;
+    return Object.assign({}, h, { price, market, costVal, pnl, pnlPct });
+  });
+  const body = document.getElementById("repBody");
+  if (!rows.length) { body.innerHTML = '<div class="rep-note">还没有持仓数据，先添加几只再看报告吧。</div>'; document.getElementById("repMask").classList.add("show"); return; }
+  let totalMarket = 0, totalCost = 0, win = 0, lose = 0, flat = 0;
+  rows.forEach(r => { totalMarket += r.market; totalCost += r.costVal; if (r.pnl > 0) win++; else if (r.pnl < 0) lose++; else flat++; });
+  const totalPnl = totalMarket - totalCost;
+  const totalPct = totalCost > 0 ? totalPnl / totalCost * 100 : 0;
+  const winRate = (win + lose + flat) > 0 ? win / (win + lose + flat) * 100 : 0;
+  const sorted = rows.slice().sort((a, b) => b.pnl - a.pnl);
+  const topGain = sorted.filter(r => r.pnl > 0).slice(0, 3);
+  const topLoss = sorted.slice().reverse().filter(r => r.pnl < 0).slice(0, 3);
+  let maxW = 0, maxName = "--";
+  rows.forEach(r => { const w = totalMarket > 0 ? r.market / totalMarket * 100 : 0; if (w > maxW) { maxW = w; maxName = r.name || r.code; } });
+  let mood = "—";
+  if (breadthCache && !breadthCache.error) {
+    const ratio = breadthCache.up / (breadthCache.up + breadthCache.down || 1);
+    mood = ratio >= 0.58 ? "偏多" : (ratio <= 0.42 ? "偏空" : "均衡");
+  }
+  const tdc = dirClass(totalPnl);
+  const conc = maxW > 50 ? '<b class="up">偏高</b>，建议适度分散' : (maxW > 30 ? "适中偏集中" : "较分散");
+  const html = `
+    <div class="rep-section">
+      <h4>一、总体盈亏</h4>
+      <div class="rep-grid">
+        <div class="hold-stat"><div class="k">总市值</div><div class="v">¥${fmtAmount(totalMarket)}</div></div>
+        <div class="hold-stat"><div class="k">总成本</div><div class="v">¥${fmtAmount(totalCost)}</div></div>
+        <div class="hold-stat"><div class="k">总盈亏</div><div class="v ${tdc}">${fmtChange(totalPnl)}</div></div>
+        <div class="hold-stat"><div class="k">收益率</div><div class="v ${tdc}">${fmtPct(totalPct)}</div></div>
+      </div>
+    </div>
+    <div class="rep-section">
+      <h4>二、盈利分布</h4>
+      <div class="rep-note">盈利 <b class="up">${win}</b> 只 · 亏损 <b class="down">${lose}</b> 只 · 平 <b>${flat}</b> 只　|　胜率 <b>${winRate.toFixed(1)}%</b></div>
+    </div>
+    <div class="rep-section">
+      <h4>三、盈亏 TOP（按金额）</h4>
+      ${topGain.length ? `<div class="rep-note" style="margin-bottom:6px;color:var(--up)">盈利最多：</div>` + topGain.map(r => `<div class="rep-row"><span class="nm">${r.name || r.code}</span><span class="val up">${fmtChange(r.pnl)} (${fmtPct(r.pnlPct)})</span></div>`).join("") : '<div class="rep-note">暂无盈利持仓</div>'}
+      ${topLoss.length ? `<div class="rep-note" style="margin:8px 0 6px;color:var(--down)">亏损最多：</div>` + topLoss.map(r => `<div class="rep-row"><span class="nm">${r.name || r.code}</span><span class="val down">${fmtChange(r.pnl)} (${fmtPct(r.pnlPct)})</span></div>`).join("") : '<div class="rep-note">暂无亏损持仓</div>'}
+    </div>
+    <div class="rep-section">
+      <h4>四、仓位集中度与风险体检</h4>
+      <div class="rep-note">最大单一持仓：<b>${maxName}</b> 占 <b>${maxW.toFixed(1)}%</b> —— 集中度 ${conc}。</div>
+      ${lose > 0 ? `<div class="rep-note">当前有 <b class="down">${lose}</b> 只持仓处于亏损，占持仓数 ${(lose / (win + lose + flat) * 100).toFixed(1)}%，可关注是否需调整。</div>` : ""}
+      <div class="rep-note">当前大盘环境：<b>${mood}</b>（仅供参考）。</div>
+    </div>
+    <div class="rep-disclaimer">⚠️ 本报告仅基于实时行情与你的持仓数据做统计，<b>不构成任何投资建议</b>。投资有风险，入市需谨慎。</div>`;
+  body.innerHTML = html;
+  document.getElementById("repMask").classList.add("show");
+}
+document.getElementById("closeRep").addEventListener("click", () => document.getElementById("repMask").classList.remove("show"));
+document.getElementById("repMask").addEventListener("click", e => { if (e.target === document.getElementById("repMask")) document.getElementById("repMask").classList.remove("show"); });
+
 document.getElementById("refreshBtn").addEventListener("click", load);
 (async () => {
   let refreshSec = 3;
   try { const c = await (await fetch("/config.json")).json(); refreshSec = c.refreshSeconds || 3; } catch (e) {}
   load(); loadBoards(); loadBreadth(); loadRank();
+  renderHoldings(); refreshHoldingsQuotes();
   setInterval(load, refreshSec * 1000);
   setInterval(loadBoards, 15000);
   setInterval(loadBreadth, 15000);
   setInterval(loadRank, 30000);
+  setInterval(refreshHoldingsQuotes, Math.max(refreshSec, 3) * 1000);
   window.addEventListener("resize", () => chart && chart.resize());
 })();
 </script>

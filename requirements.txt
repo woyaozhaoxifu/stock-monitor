@@ -1,0 +1,6 @@
+# 核心运行时：仅使用 Python 3.8+ 标准库，无需安装任何第三方包即可运行。
+#
+# 可选依赖（非必须）：
+#   pywebview  —— 提供原生桌面窗口（否则自动回退为浏览器打开）
+#   pip install pywebview
+pywebview>=5.0

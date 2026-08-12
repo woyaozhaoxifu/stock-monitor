@@ -1010,6 +1010,107 @@ def fetch_user_quotes(codes_str):
 
 
 # ================================================================
+#  市场资讯（财经快讯 + 公司公告，双源互补：本机新浪快讯 / 公网东财公告）
+# ================================================================
+
+SINA_NEWS_URL = "https://feed.mix.sina.com.cn/api/roll/get?pageid=153&lid=2509&k=&num=20&page=1"
+EM_NOTICE_URL = "https://np-anotice-stock.eastmoney.com/api/notice/query?page_size=20&page_index=1"
+
+_news_cache = {"sina": {"ts": 0, "data": None}, "em": {"ts": 0, "data": None}}
+_news_ttl = 300
+
+
+def _http_json(url, timeout=7, referer=None):
+    """通用 GET JSON（容错 JSONP 包裹），失败返回 (None, '')。"""
+    try:
+        hd = dict(HEADERS)
+        if referer:
+            hd["Referer"] = referer
+        req = urllib.request.Request(url, headers=hd)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", "ignore")
+    except Exception:
+        return None, ""
+    m = re.search(r'\(\s*(\{.*\})\s*\)\s*;?\s*$', raw, re.S)
+    if m:
+        raw = m.group(1)
+    try:
+        return json.loads(raw), raw
+    except Exception:
+        return None, raw
+
+
+def get_sina_news():
+    now = time.time()
+    c = _news_cache["sina"]
+    if c["data"] is not None and now - c["ts"] < _news_ttl:
+        return c["data"]
+    data, _ = _http_json(SINA_NEWS_URL, referer="https://finance.sina.com.cn/")
+    items = []
+    if data:
+        lst = data.get("result", {}).get("data", [])
+        if isinstance(lst, list):
+            for it in lst:
+                if not isinstance(it, dict):
+                    continue
+                ts = it.get("ctime")
+                try:
+                    ts = int(ts)
+                except (TypeError, ValueError):
+                    ts = 0
+                items.append({
+                    "title": it.get("title", ""),
+                    "url": it.get("url", ""),
+                    "time": ts,
+                    "source": it.get("media_name") or it.get("author") or "新浪财经",
+                    "intro": (it.get("intro") or it.get("summary") or "")[:80],
+                })
+    res = items if items else None
+    _news_cache["sina"] = {"ts": now, "data": res}
+    return res
+
+
+def get_em_notices():
+    now = time.time()
+    c = _news_cache["em"]
+    if c["data"] is not None and now - c["ts"] < _news_ttl:
+        return c["data"]
+    data, _ = _http_json(EM_NOTICE_URL, referer="https://data.eastmoney.com/")
+    items = []
+    if data:
+        d = data.get("data", {})
+        lst = d.get("list") if isinstance(d, dict) else None
+        if isinstance(lst, list):
+            for it in lst:
+                if not isinstance(it, dict):
+                    continue
+                code = it.get("security_code") or it.get("code") or ""
+                items.append({
+                    "title": it.get("title") or it.get("notice_title") or "",
+                    "url": it.get("url") or it.get("notice_url") or "",
+                    "time": it.get("notice_date") or it.get("eitime") or it.get("datetime") or "",
+                    "source": ("东方财富公告" + (" · " + code if code else "")),
+                    "intro": (it.get("summary") or it.get("digest") or "")[:80],
+                })
+    res = items if items else None
+    _news_cache["em"] = {"ts": now, "data": res}
+    return res
+
+
+def get_news(src="sina"):
+    if src == "em":
+        items = get_em_notices()
+    else:
+        items = get_sina_news()
+    return {
+        "src": src,
+        "items": items or [],
+        "updated": int(time.time() * 1000),
+        "error": None if items else "暂无可用的资讯源（可能受网络限制）",
+    }
+
+
+# ================================================================
 #  状态聚合
 # ================================================================
 
@@ -1167,6 +1268,14 @@ class Handler(BaseHTTPRequestHandler):
             codes = (qs.get("codes") or [""])[0]
             try:
                 self._json({"items": fetch_user_quotes(codes)})
+            except Exception as e:
+                self._json({"error": str(e)})
+            return
+        if path == "/api/news":
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            src = (qs.get("src") or ["sina"])[0]
+            try:
+                self._json(get_news(src))
             except Exception as e:
                 self._json({"error": str(e)})
             return

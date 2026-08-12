@@ -236,6 +236,17 @@ window.echarts || document.write('<script src="https://cdn.jsdelivr.net/npm/echa
   .rep-row .val { margin-left: auto; text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; white-space: nowrap; }
   .rep-note { font-size: 12.5px; color: var(--muted); line-height: 1.8; }
   .rep-disclaimer { font-size: 11.5px; color: var(--muted2); border-top: 1px solid var(--border-soft); padding-top: 12px; margin-top: 8px; line-height: 1.7; }
+
+  /* ---------- 市场资讯 ---------- */
+  .news-list { display: flex; flex-direction: column; max-height: 340px; overflow: auto; }
+  .news-item { display: block; padding: 9px 8px; border-bottom: 1px solid var(--border-soft); text-decoration: none; color: inherit; transition: background .12s; }
+  .news-item:last-child { border-bottom: none; }
+  .news-item:hover { background: var(--panel2); }
+  .news-item .nt { font-size: 13px; line-height: 1.5; font-weight: 600; }
+  .news-item .nm { display: flex; gap: 8px; margin-top: 5px; font-size: 11px; color: var(--muted); align-items: baseline; }
+  .news-item .nm .src { color: var(--accent); flex: none; }
+  .news-item .nm .intro { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .news-item .nm .time { flex: none; color: var(--muted2); }
   @media (max-width: 1080px) { .hold-summary, .rep-grid { grid-template-columns: repeat(2, 1fr); } }
 </style>
 </head>
@@ -350,6 +361,18 @@ window.echarts || document.write('<script src="https://cdn.jsdelivr.net/npm/echa
           <span class="hint">美股 / 港股 / 日股 / 韩股</span>
         </div>
         <div id="globalWrap"></div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head">
+          <h2>市场资讯</h2>
+          <span class="hint">快讯 / 公告 · 实时</span>
+        </div>
+        <div class="rank-tabs news-tabs">
+          <div class="tab newsTab active" data-src="sina">财经快讯</div>
+          <div class="tab newsTab" data-src="em">公司公告</div>
+        </div>
+        <div class="news-list" id="newsList"><div class="empty">加载中…</div></div>
       </div>
     </div>
   </div>
@@ -864,6 +887,39 @@ document.getElementById("clearLinesBtn").addEventListener("click", function () {
 });
 document.addEventListener("keydown", e => { if (e.key === "Escape" && drawMode) { pendingPoint = null; document.getElementById("drawHint").textContent = "已取消"; if (curType === "kline") renderKline(); } });
 
+// ============ 市场资讯 ============
+let curNewsSrc = "sina";
+function fmtNewsTime(t) {
+  if (!t) return "";
+  let d;
+  if (typeof t === "number") d = new Date(t * 1000);
+  else { try { d = new Date(String(t).replace(/-/g, "/")); } catch (e) { return ""; } }
+  if (isNaN(d.getTime())) return "";
+  const p = n => String(n).padStart(2, "0");
+  return `${d.getMonth() + 1}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+function renderNews(items) {
+  const box = document.getElementById("newsList");
+  if (!items || !items.length) { box.innerHTML = '<div class="empty">暂无可用的资讯（可能受网络限制）</div>'; return; }
+  box.innerHTML = items.map(n => `<a class="news-item" href="${n.url || "#"}" target="_blank" rel="noopener">
+    <div class="nt">${n.title || ""}</div>
+    <div class="nm"><span class="src">${n.source || ""}</span><span class="intro">${n.intro || ""}</span><span class="time">${fmtNewsTime(n.time)}</span></div>
+  </a>`).join("");
+}
+async function loadNews(src) {
+  try {
+    const r = await fetch("/api/news?src=" + src, { cache: "no-store" });
+    const d = await r.json();
+    if (src === curNewsSrc) renderNews(d.items);
+  } catch (e) {}
+}
+document.querySelectorAll(".newsTab").forEach(t => t.addEventListener("click", () => {
+  document.querySelectorAll(".newsTab").forEach(x => x.classList.remove("active"));
+  t.classList.add("active");
+  curNewsSrc = t.dataset.src;
+  loadNews(curNewsSrc);
+}));
+
 // ============ 我的持仓 ============
 const HOLD_KEY = "stockboard_holdings";
 function loadHoldings() {
@@ -1051,12 +1107,13 @@ document.getElementById("refreshBtn").addEventListener("click", load);
   let refreshSec = 3;
   try { const c = await (await fetch("/config.json")).json(); refreshSec = c.refreshSeconds || 3; } catch (e) {}
   load(); loadBoards(); loadBreadth(); loadRank();
-  renderHoldings(); refreshHoldingsQuotes();
+  renderHoldings(); refreshHoldingsQuotes(); loadNews(curNewsSrc);
   setInterval(load, refreshSec * 1000);
   setInterval(loadBoards, 15000);
   setInterval(loadBreadth, 15000);
   setInterval(loadRank, 30000);
   setInterval(refreshHoldingsQuotes, Math.max(refreshSec, 3) * 1000);
+  setInterval(() => loadNews(curNewsSrc), 120000);
   window.addEventListener("resize", () => chart && chart.resize());
 })();
 </script>

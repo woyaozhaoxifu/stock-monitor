@@ -137,6 +137,7 @@ stock-monitor/
 | `GET /api/trends?secid=` | 分时 |
 | `GET /api/search?q=` | 智能搜索 |
 | `GET /api/quotes?codes=` | 批量取实时价（6 位代码或腾讯符号，逗号分隔），供持仓模块计算盈亏 |
+| `GET /api/news?src=sina\|em` | 市场资讯：`sina`=新浪财经快讯（本机直连），`em`=东方财富公司公告（海外机房可用），双源互补 |
 | `POST /api/add_watch` | 加自选 `{secid}` |
 | `POST /api/remove_watch` | 移除自选 `{secid}` |
 | `POST /api/reorder_watch` | 调整顺序 `{secids:[...]}` |

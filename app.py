@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-实时行情看板 · 媳妇版 v2 —— 全腾讯财经数据源
+实时行情看板 v2 —— 全腾讯财经数据源
 - A股 / 美股 / 港股 / 日股 / 韩股：全部走腾讯 qt.gtimg.cn（国内直连）
 - K线 / 分时：走腾讯 web.ifzq.gtimg.cn
 - 零依赖 + pywebview 原生窗口（可选）
@@ -1202,6 +1202,10 @@ def main():
     port = pick_port(int(os.environ.get("PORT", "8787")))
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     url = f"http://127.0.0.1:{port}/"
+    try:
+        app_title = load_config().get("title", "实时行情看板")
+    except Exception:
+        app_title = "实时行情看板"
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
 
@@ -1212,17 +1216,17 @@ def main():
         has_wv = False
 
     force_browser = os.environ.get("NO_WINDOW") == "1"
-    print(f"[媳妇] 行情看板已启动（v{VERSION}，腾讯/新浪数据源）：{url}")
+    print(f"[看板] 行情看板已启动（v{VERSION}，腾讯/新浪数据源）：{url}")
     if has_wv and not force_browser:
         try:
-            print("[媳妇] 已打开原生窗口（可最大化/最小化/拖拽缩放）。")
+            print("[看板] 已打开原生窗口（可最大化/最小化/拖拽缩放）。")
             webview.create_window(
-                "实时行情看板 · 媳妇版", url,
+                app_title, url,
                 width=1280, height=820, resizable=True, min_size=(720, 520),
             )
             webview.start()
         except Exception as e:
-            print(f"[媳妇] 原生窗口打开失败（{e}），改用浏览器打开。")
+            print(f"[看板] 原生窗口打开失败（{e}），改用浏览器打开。")
             try:
                 webbrowser.open(url)
             except Exception:
@@ -1234,8 +1238,8 @@ def main():
                 pass
     else:
         if not has_wv:
-            print("[媳妇] 未安装 pywebview，改用浏览器打开。")
-            print("[媳妇] 想要原生窗口可运行：python -m pip install pywebview")
+            print("[看板] 未安装 pywebview，改用浏览器打开。")
+            print("[看板] 想要原生窗口可运行：python -m pip install pywebview")
         try:
             webbrowser.open(url)
         except Exception:
@@ -1245,7 +1249,7 @@ def main():
                 time.sleep(1)
         except KeyboardInterrupt:
             pass
-    print("\n[媳妇] 已关闭。")
+    print("\n[看板] 已关闭。")
     server.shutdown()
 
 

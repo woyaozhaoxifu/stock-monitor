@@ -10,6 +10,9 @@ config.json
 *.log
 *.bak
 
+# 第三方图表库（体积大，改用 CDN 兜底；放本地可离线，不入库）
+echarts.min.js
+
 # OS
 .DS_Store
 Thumbs.db

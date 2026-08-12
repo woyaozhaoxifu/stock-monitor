@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>实时行情看板</title>
 <script src="echarts.min.js"></script>
+<script>/* 本地 echarts 缺失时回退 CDN（公开仓库不捆绑 1MB 的 echarts.min.js） */
+window.echarts || document.write('<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"><\/script>');</script>
 <style>
   :root {
     --bg: #0d1117; --bg2: #0a0e14;
@@ -194,6 +196,9 @@
   .tool-btn:hover { color: var(--text); border-color: var(--accent); }
   .tool-btn.active { color: #fff; border-color: var(--accent); background: rgba(68,147,248,.16); }
   .tool-btn.drawing { color: #fff; border-color: #a371f7; background: rgba(163,113,247,.18); }
+  .sr-period { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--muted); }
+  .sr-period input { width: 56px; padding: 5px 7px; border-radius: 8px; background: var(--panel2); border: 1px solid var(--border); color: var(--text); font-size: 12px; outline: none; }
+  .sr-period input:focus { border-color: var(--accent); }
   .tool-hint { font-size: 12px; color: #a371f7; margin-left: 4px; }
 
   @media (max-width: 1080px) {
@@ -346,6 +351,7 @@
       <div class="chart-tools" id="chartTools">
         <button class="tool-btn active" id="maBtn">均线 MA</button>
         <button class="tool-btn active" id="srBtn">支撑 / 压力</button>
+        <label class="sr-period">周期 <input type="number" id="srPeriod" min="5" max="250" step="1" value="20"> 根</label>
         <button class="tool-btn" id="drawBtn">✎ 画趋势线</button>
         <button class="tool-btn" id="clearLinesBtn">清除画线</button>
         <span class="tool-hint" id="drawHint"></span>
@@ -606,6 +612,8 @@ document.addEventListener("click", e => { if (!e.target.closest(".watch-tools"))
 let chart = null, curSecid = null, curType = "trends", curKlt = "101";
 let curKlineData = [];
 let showMA = true, showSR = true, drawMode = false, pendingPoint = null;
+let srPeriod = 20;
+try { srPeriod = Math.max(5, Math.min(250, parseInt(localStorage.getItem("stockboard_srPeriod") || "20", 10) || 20)); } catch (e) { srPeriod = 20; }
 let userLines = {};
 try { userLines = JSON.parse(localStorage.getItem("stockboard_lines") || "{}"); } catch (e) { userLines = {}; }
 const linesKey = () => curSecid + "_" + curKlt;
@@ -701,7 +709,7 @@ function renderKline() {
   const x = rows.map(r => r.date);
   const candle = rows.map(r => [r.open, r.close, r.low, r.high]);
   const vols = rows.map(r => ({ value: r.vol, itemStyle: { color: r.close >= r.open ? "rgba(255,77,79,.55)" : "rgba(22,199,132,.55)" } }));
-  const tail = rows.slice(-20);
+  const tail = rows.slice(-srPeriod);
   const support = Math.min.apply(null, tail.map(r => r.low));
   const resist = Math.max.apply(null, tail.map(r => r.high));
   const segs = (userLines[linesKey()] || []).map(l => [{ coord: [l.d1, l.p1] }, { coord: [l.d2, l.p2] }]);
@@ -766,6 +774,16 @@ function bindDraw() {
 }
 document.getElementById("maBtn").addEventListener("click", function () { showMA = !showMA; this.classList.toggle("active", showMA); if (curType === "kline") renderKline(); });
 document.getElementById("srBtn").addEventListener("click", function () { showSR = !showSR; this.classList.toggle("active", showSR); if (curType === "kline") renderKline(); });
+const srPeriodInput = document.getElementById("srPeriod");
+srPeriodInput.value = srPeriod;
+srPeriodInput.addEventListener("change", function () {
+  let v = parseInt(this.value, 10);
+  if (isNaN(v)) v = 20;
+  v = Math.max(5, Math.min(250, v));
+  this.value = v; srPeriod = v;
+  try { localStorage.setItem("stockboard_srPeriod", String(v)); } catch (e) {}
+  if (curType === "kline") renderKline();
+});
 document.getElementById("drawBtn").addEventListener("click", function () {
   drawMode = !drawMode; pendingPoint = null;
   this.classList.toggle("drawing", drawMode);

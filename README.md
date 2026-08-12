@@ -36,6 +36,8 @@ python app.py
 
 程序会自动在 `http://127.0.0.1:8787/` 启动，并打开窗口 / 浏览器。
 
+> ECharts 默认从本地 `echarts.min.js` 加载；若该文件不存在，会自动回退到 CDN（jsdelivr）。想完全离线用，就把 `echarts.min.js` 放到目录里。
+
 > 想固定关注标的？编辑同目录 `config.json`（首次运行会自动从 `config.example.json` 生成）。
 
 ### 方式二：原生桌面窗口（可选）
@@ -82,7 +84,7 @@ python app.py
 stock-monitor/
 ├── app.py                 # 后端：HTTP 服务 + 行情聚合（标准库，零依赖）
 ├── index.html             # 前端：单文件看板 UI（ECharts 内联）
-├── echarts.min.js         # 图表库（已随仓库附带，离线可用）
+├── echarts.min.js         # 图表库（可选：放本地则离线用；缺失时自动从 CDN 加载，不入库）
 ├── config.example.json    # 配置示例（首次运行自动生成 config.json）
 ├── config.json            # 你的个人配置（已被 .gitignore 忽略）
 ├── astocks.json           # 全A代码缓存（自动生成，已忽略）

@@ -1200,8 +1200,11 @@ def main():
         return pref
 
     port = pick_port(int(os.environ.get("PORT", "8787")))
-    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    url = f"http://127.0.0.1:{port}/"
+    # 本地默认只监听回环；部署到云平台（Render 等，HOST 或 RENDER 环境变量）时监听 0.0.0.0 才能接收外部请求
+    host = os.environ.get("HOST") or ("0.0.0.0" if os.environ.get("RENDER") else "127.0.0.1")
+    server = ThreadingHTTPServer((host, port), Handler)
+    shown = "127.0.0.1" if host == "0.0.0.0" else host
+    url = f"http://{shown}:{port}/"
     try:
         app_title = load_config().get("title", "实时行情看板")
     except Exception:

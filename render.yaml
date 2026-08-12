@@ -1,0 +1,17 @@
+# Render 一键部署配置（https://render.com）
+# 在 Render 选择 "New +" -> "Blueprint" -> 连接本仓库即可自动按此配置部署
+services:
+  - type: web
+    name: stock-monitor
+    runtime: python
+    plan: free
+    region: singapore
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python app.py"
+    envVars:
+      - key: HOST
+        value: "0.0.0.0"
+      - key: NO_WINDOW
+        value: "1"
+      - key: PYTHON_VERSION
+        value: "3.13.0"

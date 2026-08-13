@@ -677,25 +677,19 @@ def _load_valid_codes(force=False):
                     return codes
         except Exception:
             pass
-    # 重新生成：并发拉 hq，过滤出现价>0 的有效代码（排除转债/ETF/B股/停牌）
+    # 重新生成：用腾讯批量取价探测有效代码（替代 hq.sinajs，避免被网络代理拦截）
     cands = _gen_a_candidates()
-    chunks = [cands[i:i + 200] for i in range(0, len(cands), 200)]
+    chunks = [cands[i:i + 15] for i in range(0, len(cands), 15)]
     valid = []
-    for raw in _fetch_hq(chunks):
-        for line in raw.strip().split("\n"):
-            if "hq_str_" not in line:
-                continue
-            code = line[line.find("hq_str_") + len("hq_str_"):line.find("=")]
-            body = line[line.find('"') + 1:line.rfind('"')]
-            segs = body.split(",")
-            if len(segs) < 4 or not segs[0]:
-                continue
-            try:
-                price = float(segs[3])
-            except (ValueError, IndexError):
-                continue
-            if price > 0:
-                valid.append(code)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=24) as ex:
+        for res in ex.map(fetch_quotes_batch, chunks):
+            for sym, it in res.items():
+                if isinstance(it, dict) and it.get("price"):
+                    try:
+                        if float(it["price"]) > 0:
+                            valid.append(sym)
+                    except (ValueError, TypeError):
+                        pass
     valid = sorted(set(valid))
     try:
         with open(fp, "w", encoding="utf-8") as f:
@@ -731,31 +725,78 @@ def _hq_quotes(codes):
     return out
 
 
-def fetch_breadth():
-    """真实涨跌家数——逐只统计全A（沪深京）实时行情，非估算。"""
-    codes = _load_valid_codes()
+# ================================================================
+#  全A 腾讯实时行情（共享缓存）
+#  替代 hq.sinajs.cn：腾讯源在本地(Clash)与公网均可用，保证两端都能看
+# ================================================================
+
+_tx_all_cache = {"ts": 0, "data": None}
+_tx_all_ttl = 15
+
+
+def _tx_scan(codes, workers=24):
+    """并发用腾讯 qt.gtimg.cn 批量取价，返回 {code: dict}。"""
     if not codes:
-        raise Exception("无有效股票代码清单")
-    quotes = _hq_quotes(codes)
+        return {}
+    chunks = [codes[i:i + 15] for i in range(0, len(codes), 15)]
+    out = {}
+
+    def _w(ch):
+        try:
+            return fetch_quotes_batch(ch)
+        except Exception:
+            return {}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+        for r in ex.map(_w, chunks):
+            out.update(r)
+    return out
+
+
+def _tx_all_quotes(force=False):
+    """全A 腾讯实时行情（{code: {name,price,prevClose,pct,high,low,turnover,amount}}），15s 缓存供多面板复用。"""
+    global _tx_all_cache
+    now = time.time()
+    if (not force) and _tx_all_cache["data"] and now - _tx_all_cache["ts"] < _tx_all_ttl:
+        return _tx_all_cache["data"]
+    codes = _load_valid_codes()
+    d = _tx_scan(codes) if codes else {}
+    _tx_all_cache["data"] = d
+    _tx_all_cache["ts"] = now
+    return d
+
+
+def fetch_breadth():
+    """真实涨跌家数——逐只统计全A（沪深京）腾讯实时行情，非估算。"""
+    quotes = _tx_all_quotes()
+    if not quotes:
+        raise Exception("无有效行情数据")
     up = down = flat = 0
-    for prev, price, vol in quotes.values():
-        if price > prev:
-            up += 1
-        elif price < prev:
-            down += 1
-        else:
-            flat += 1          # 含停牌（现价=昨收）与平盘，保证 涨+跌+平=总数
+    valid = 0
     total_amt = 0.0
-    try:
-        idx = fetch_quotes_batch(["sh000001", "sz399001"])
-        for it in idx.values():
-            if it.get("amount"):
-                total_amt += float(it["amount"])
-    except Exception:
-        pass
+    for it in quotes.values():
+        if not isinstance(it, dict) or it.get("error"):
+            continue
+        valid += 1
+        pct = it.get("pct")
+        price = it.get("price"); prev = it.get("prevClose")
+        if pct is not None:
+            if pct > 0: up += 1
+            elif pct < 0: down += 1
+            else: flat += 1
+        elif price is not None and prev:
+            if price > prev: up += 1
+            elif price < prev: down += 1
+            else: flat += 1
+        amt = it.get("amount")
+        if amt:
+            try:
+                total_amt += float(amt)
+            except (TypeError, ValueError):
+                pass
     return {
         "up": up, "down": down, "flat": flat,
-        "total": len(quotes), "estimate": False, "basis": "sina-hq-realtime",
+        "total": valid, "estimate": False, "basis": "tencent-realtime",
         "totalAmount": total_amt,
     }
 
@@ -783,34 +824,24 @@ _rank_ttl = 30
 
 
 def _rank_data():
-    """全A个股涨跌榜（实时）：hq.sinajs.cn 逐只取 名称/昨收/现价，算涨跌幅排序。
-    仅保留沪深（北交所腾讯行情/图表不覆盖，剔除）。返回 涨幅榜 + 跌幅榜。"""
-    codes = _load_valid_codes()
-    if not codes:
+    """全A个股涨跌榜（腾讯实时）：取 名称/昨收/现价 算涨跌幅排序。
+    仅保留沪深（北交所腾讯行情覆盖弱，剔除）。返回 涨幅榜 + 跌幅榜。"""
+    quotes = _tx_all_quotes()
+    if not quotes:
         return {"gainers": [], "losers": [], "total": 0}
-    chunks = [codes[i:i + 200] for i in range(0, len(codes), 200)]
     rows = []
-    for raw in _fetch_hq(chunks):
-        for line in raw.strip().split("\n"):
-            if "hq_str_" not in line:
-                continue
-            code = line[line.find("hq_str_") + len("hq_str_"):line.find("=")]
-            if not code.startswith(("sh", "sz")):   # 剔除北交所
-                continue
-            body = line[line.find('"') + 1:line.rfind('"')]
-            segs = body.split(",")
-            if len(segs) < 4 or not segs[0]:
-                continue
-            try:
-                prev = float(segs[2])    # 昨收
-                price = float(segs[3])   # 现价
-            except (ValueError, IndexError):
-                continue
-            if price <= 0 or prev <= 0:
-                continue
+    for code, it in quotes.items():
+        if not isinstance(it, dict) or it.get("error"):
+            continue
+        if not code.startswith(("sh", "sz")):   # 剔除北交所
+            continue
+        price = it.get("price"); prev = it.get("prevClose"); pct = it.get("pct")
+        if price is None or prev is None or price <= 0 or prev <= 0:
+            continue
+        if pct is None:
             pct = round((price - prev) / prev * 100, 2)
-            secid = ("1." if code.startswith("sh") else "0.") + code[2:]
-            rows.append({"code": code, "secid": secid, "name": segs[0], "price": price, "pct": pct})
+        secid = ("1." if code.startswith("sh") else "0.") + code[2:]
+        rows.append({"code": code, "secid": secid, "name": it.get("name", code), "price": price, "pct": pct})
     gainers = sorted(rows, key=lambda x: x["pct"], reverse=True)[:15]
     losers = sorted(rows, key=lambda x: x["pct"])[:15]
     return {"gainers": gainers, "losers": losers, "total": len(rows)}
@@ -1156,36 +1187,53 @@ _billboard_ttl = 60
 
 
 def get_billboard():
+    """龙虎榜·异动榜：用腾讯全A实时行情，按交易所龙虎榜上榜条件筛选异动股
+    （涨停/接近涨停、高换手、高振幅），本机(Clash)与公网均可用。
+    注：腾讯免费源无席位数据，故不展示净买入额，仅标注异动类型。"""
     now = time.time()
     c = _billboard_cache
     if c["data"] is not None and now - c["ts"] < _billboard_ttl:
         return c["data"]
-    data, _ = _http_json(LHB_URL, referer="https://data.eastmoney.com/")
+    quotes = _tx_all_quotes()
     items = []
-    if data:
-        d = data.get("data") if isinstance(data, dict) else None
-        lst = []
-        if isinstance(d, dict):
-            v = d.get("list")
-            if isinstance(v, list):
-                lst = v
-        elif isinstance(d, list):
-            lst = d
-        for it in lst:
-            if not isinstance(it, dict):
+    if quotes:
+        for code, it in quotes.items():
+            if not isinstance(it, dict) or it.get("error"):
                 continue
-            code = it.get("SECURITYCODE") or it.get("STOCKCODE") or it.get("CODE") or ""
-            name = it.get("SECURITYNAME") or it.get("STOCKNAME") or it.get("NAME") or ""
-            reason = it.get("EXPLANATION") or it.get("REASON") or ""
-            pct = it.get("CHANGERATE")
-            net = it.get("NETBUY") or it.get("BILLBOARD_NET_BUY")
-            buy = it.get("TOTALBUY")
-            sell = it.get("TOTALSELL")
-            close = it.get("CLOSEPRICE")
+            if not code.startswith(("sh", "sz")):   # 剔除北交所
+                continue
+            price = it.get("price"); prev = it.get("prevClose")
+            pct = it.get("pct")
+            if pct is None and price and prev:
+                try:
+                    pct = (price - prev) / prev * 100
+                except Exception:
+                    pct = None
+            high = it.get("high"); low = it.get("low"); turnover = it.get("turnover")
+            reasons = []
+            if pct is not None and pct >= 9.5:
+                reasons.append("涨停")
+            if turnover is not None and turnover >= 15:
+                reasons.append("高换手%d%%" % round(turnover))
+            amp = None
+            if high and low and prev:
+                try:
+                    amp = (high - low) / prev * 100
+                except Exception:
+                    amp = None
+            if amp is not None and amp >= 15:
+                reasons.append("高振幅%d%%" % round(amp))
+            if not reasons:
+                continue
             items.append({
-                "code": code, "name": name, "reason": reason,
-                "pct": pct, "net": net, "buy": buy, "sell": sell, "close": close,
+                "code": code, "name": it.get("name", code),
+                "reason": " · ".join(reasons),
+                "pct": round(pct, 2) if pct is not None else None,
+                "net": None, "buy": None, "sell": None, "close": price,
             })
+        # 涨停优先，其次按涨跌幅降序
+        items.sort(key=lambda x: (0 if "涨停" in x["reason"] else 1, -(x["pct"] or 0)))
+        items = items[:15]
     res = items if items else None
     _billboard_cache["ts"] = now
     _billboard_cache["data"] = res

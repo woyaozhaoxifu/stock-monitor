@@ -192,8 +192,9 @@ window.echarts || document.write('<script src="https://cdn.jsdelivr.net/npm/echa
   /* modal */
   .modal-mask { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: none; align-items: center; justify-content: center; z-index: 50; backdrop-filter: blur(3px); }
   .modal-mask.show { display: flex; }
-  .modal { background: var(--panel); border: 1px solid var(--border); border-radius: 16px; width: min(900px, 95vw); padding: 18px 20px; box-shadow: var(--shadow); }
-  .modal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+  .modal { background: var(--panel); border: 1px solid var(--border); border-radius: 16px; width: min(900px, 95vw); max-height: 92vh; overflow: auto; padding: 18px 20px; box-shadow: var(--shadow); }
+  .modal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; cursor: grab; user-select: none; }
+  .modal-head:active { cursor: grabbing; }
   .modal-head .mt { font-size: 17px; font-weight: 800; }
   .modal-head .mt .mc { color: var(--muted); font-size: 12px; font-weight: 400; margin-left: 9px; }
   .tabs { display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
@@ -1158,7 +1159,7 @@ function renderStockInfo(info) {
       </div>
       <div id="infoKline" class="info-kline"></div>
     </div>
-    <div class="kline-cap">支撑/压力 · 近期高低 · 枢轴点 · 均线MA · 密集成交 多法共振，标注置信度 高 / 中 / 低；分时=当日走势，日/周/月K可自绘趋势线</div>
+    <div class="kline-cap">支撑/压力 · 近期高低 · 枢轴点 · 均线MA · 密集成交 多法共振，标注置信度 高 / 中 / 低；分时=当日走势，日/周/月K可自绘趋势线；底部滚动条拖动或鼠标滚轮可横向平移 K 线</div>
     <div class="info-grid">
       ${cell("最新价", fmtPrice(info.price), dc)}
       ${cell("涨跌额", fmtChange(info.change), dc)}
@@ -1186,6 +1187,38 @@ function renderStockInfo(info) {
 }
 document.getElementById("closeInfo").addEventListener("click", () => infoMask.classList.remove("show"));
 infoMask.addEventListener("click", e => { if (e.target === infoMask) infoMask.classList.remove("show"); });
+
+// 弹窗可拖拽：拖动标题栏移动弹窗，避免小窗下卡在中间看不全
+function makeModalDraggable(mask) {
+  const modal = mask.querySelector(".modal");
+  const head = modal.querySelector(".modal-head");
+  if (!modal || !head) return;
+  const resetPos = () => { modal.style.position = ""; modal.style.margin = ""; modal.style.left = ""; modal.style.top = ""; };
+  let dragging = false, sx = 0, sy = 0, ox = 0, oy = 0;
+  head.addEventListener("mousedown", e => {
+    if (e.target.closest("button")) return;
+    const r = modal.getBoundingClientRect();
+    dragging = true; sx = e.clientX; sy = e.clientY; ox = r.left; oy = r.top;
+    modal.style.position = "fixed"; modal.style.margin = "0";
+    modal.style.left = r.left + "px"; modal.style.top = r.top + "px";
+    document.body.style.userSelect = "none";
+    e.preventDefault();
+  });
+  document.addEventListener("mousemove", e => {
+    if (!dragging) return;
+    const w = modal.offsetWidth, h = modal.offsetHeight;
+    let nx = ox + (e.clientX - sx), ny = oy + (e.clientY - sy);
+    nx = Math.max(0, Math.min(nx, window.innerWidth - w));
+    ny = Math.max(0, Math.min(ny, window.innerHeight - h));
+    modal.style.left = nx + "px"; modal.style.top = ny + "px";
+  });
+  document.addEventListener("mouseup", () => { if (dragging) { dragging = false; document.body.style.userSelect = ""; } });
+  head.addEventListener("dblclick", resetPos);
+  const closeBtn = modal.querySelector("button");
+  if (closeBtn) closeBtn.addEventListener("click", resetPos);
+  mask.addEventListener("click", e => { if (e.target === mask) resetPos(); });
+}
+["infoMask", "sectorMask", "lhbMask"].forEach(id => { const m = document.getElementById(id); if (m) makeModalDraggable(m); });
 
 // ============ 弹窗内 K线（独立于大盘面板，单独 echarts 实例） ============
 // ============ 弹窗内 图表：分时 / 日周月K + 自绘趋势线（独立 echarts 实例） ============
@@ -1300,6 +1333,8 @@ function renderInfoKline() {
     ]
   }, true);
   infoKlineChart.resize();
+  // 个股详情放大 K 线：鼠标滚轮横向平移；底部滚动条拖动亦可平移
+  infoKlineChart.setOption({ dataZoom: [{ type: "inside", xAxisIndex: [0, 1], zoomOnMouseWheel: false, moveOnMouseWheel: true, throttle: 30 }] });
 }
 function bindInfoDraw() {
   infoKlineChart.getZr().on("click", function (e) {

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-实时行情看板 v2 —— 全腾讯财经数据源
+实时行情看板 v3.0 · 詹姆斯是goat —— 全腾讯财经数据源
 - A股 / 美股 / 港股 / 日股 / 韩股：全部走腾讯 qt.gtimg.cn（国内直连）
 - K线 / 分时：走腾讯 web.ifzq.gtimg.cn
 - 零依赖 + pywebview 原生窗口（可选）
@@ -13,6 +13,8 @@ import os
 import shutil
 import re
 import time
+import datetime
+import collections
 import concurrent.futures
 import threading
 import webbrowser
@@ -24,6 +26,7 @@ from socketserver import ThreadingMixIn
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+HOLDINGS_PATH = os.path.join(BASE_DIR, "holdings.json")
 INDEX_PATH = os.path.join(BASE_DIR, "index.html")
 
 # ---- 腾讯数据源 ----
@@ -58,7 +61,7 @@ _kline_sym_cache = {}                     # 腾讯行情代码 → K线接口实
 _yvol_cache = {}                           # 昨日成交量(手) 缓存：tx_sym → volume（每日仅变一次）
 
 # 板块数据源（新浪财经行业板块，国内直连，无需代理）
-VERSION = "2.10"
+VERSION = "3.0"
 
 
 def _yesterday_volume(tx_sym):
@@ -568,6 +571,7 @@ def _sina_boards_all():
                 items.append({
                     "code": vals[0], "name": vals[1], "pct": pct,
                     "amount": amount, "count": count,
+                    "leaderCode": vals[8] if len(vals) > 8 else "",
                     "leader": vals[12] if len(vals) > 12 else "",
                 })
             if not items:
@@ -766,6 +770,98 @@ def _tx_all_quotes(force=False):
     return d
 
 
+# ================================================================
+#  异动监控（后端滚动采样：基于全A实时行情历史计算涨跌速度/量能异动/板块异动）
+#  说明：免费腾讯源无可靠量比，放量/缩量用换手率代理；急拉急跌用价格历史窗口的速度。
+# ================================================================
+ANOMALY_HIST = {}        # code -> deque([(t, price)], maxlen=8)
+BOARD_HIST = {}          # name -> deque([(t, pct)], maxlen=8)
+_ANOM_LOCK = threading.Lock()
+
+
+def _code_to_em(code):
+    c = re.sub(r"[^0-9]", "", str(code or ""))
+    if not c:
+        return str(code or "")
+    if c[0] in ("6", "9"):
+        return "1." + c
+    if c[0] in ("0", "3"):
+        return "0." + c
+    return "TX:bj" + c
+
+
+def get_anomaly():
+    quotes = _tx_all_quotes()
+    now = time.time()
+    groups = {k: [] for k in ("急拉", "急跌", "涨停", "跌停", "大涨", "大跌", "放量", "缩量")}
+    with _ANOM_LOCK:
+        for code, it in quotes.items():
+            if not isinstance(it, dict) or it.get("error"):
+                continue
+            price = it.get("price"); pct = it.get("pct"); turnover = it.get("turnover")
+            name = it.get("name") or code
+            secid = _code_to_em(code)
+            hq = ANOMALY_HIST.setdefault(code, collections.deque(maxlen=8))
+            if price is not None:
+                hq.append((now, price))
+            velocity = None
+            if len(hq) >= 2 and (now - hq[0][0]) >= 6:
+                old = hq[0][1]
+                if old:
+                    velocity = (price - old) / old * 100
+            types = []
+            if pct is not None:
+                if pct >= 9.5: types.append("涨停")
+                elif pct <= -9.5: types.append("跌停")
+                elif pct >= 5: types.append("大涨")
+                elif pct <= -5: types.append("大跌")
+            if velocity is not None:
+                if velocity >= 1.0 and (pct or 0) > 0: types.append("急拉")
+                elif velocity <= -1.0 and (pct or 0) < 0: types.append("急跌")
+            if turnover is not None:
+                if turnover >= 8: types.append("放量")
+                elif turnover <= 0.3: types.append("缩量")
+            if types:
+                rec = {"code": code, "name": name, "secid": secid, "pct": pct,
+                       "turnover": turnover,
+                       "velocity": round(velocity, 2) if velocity is not None else None,
+                       "types": types}
+                for t in types:
+                    groups[t].append(rec)
+    boards = []
+    try:
+        blist = fetch_boards(30)
+        with _ANOM_LOCK:
+            for b in blist:
+                nm = b.get("name"); pct = b.get("pct")
+                if nm is None:
+                    continue
+                hb = BOARD_HIST.setdefault(nm, collections.deque(maxlen=8))
+                if pct is not None:
+                    hb.append((now, pct))
+                delta = None
+                if len(hb) >= 2 and (now - hb[0][0]) >= 6:
+                    old = hb[0][1]
+                    if old is not None:
+                        delta = pct - old
+                btypes = []
+                if pct is not None:
+                    if pct >= 2: btypes.append("板块拉升")
+                    elif pct <= -2: btypes.append("板块跳水")
+                if delta is not None and abs(delta) >= 0.8:
+                    btypes.append("板块异动")
+                if btypes:
+                    boards.append({"name": nm, "pct": pct,
+                                   "delta": round(delta, 2) if delta is not None else None,
+                                   "types": btypes})
+    except Exception:
+        pass
+    for k in groups:
+        groups[k] = groups[k][:12]
+    boards = boards[:12]
+    return {"groups": groups, "boards": boards, "updated": now}
+
+
 def fetch_breadth():
     """真实涨跌家数——逐只统计全A（沪深京）腾讯实时行情，非估算。"""
     quotes = _tx_all_quotes()
@@ -938,7 +1034,353 @@ def search_stock(q, pz=10):
         results.append({"secid": other, "code": q,
                         "name": ("深市" if other.startswith("0.") else "沪市") + q})
 
-    return results[:pz]
+    # 板块搜索（内置行业+概念板块名表，离线可用）
+    q_lower = q.lower()
+    sectors = []
+    try:
+        for s in get_sectors():
+            nm = s.get("name", "")
+            if not nm:
+                continue
+            if q in nm or q_lower in nm.lower() or nm.startswith(q):
+                sectors.append({"kind": "sector", "name": nm, "code": s.get("code", "")})
+            if len(sectors) >= 8:
+                break
+    except Exception:
+        sectors = []
+
+    return {"stocks": results[:pz], "sectors": sectors}
+
+
+# ================================================================
+#  板块名表（行业+概念，离线搜索用）
+# ================================================================
+
+_SECTORS_CACHE = None
+
+def get_sectors():
+    """读取内置板块名表 sectors.json（行业+Sina代码 + 概念）；首次读取后缓存。"""
+    global _SECTORS_CACHE
+    if _SECTORS_CACHE is not None:
+        return _SECTORS_CACHE
+    fp = os.path.join(BASE_DIR, "sectors.json")
+    try:
+        with open(fp, "r", encoding="utf-8") as f:
+            _SECTORS_CACHE = json.load(f)
+    except Exception:
+        _SECTORS_CACHE = []
+    return _SECTORS_CACHE
+
+
+# 常见细分行业/概念词 → 新浪行业板块名（新浪仅 49 个一级行业，银行/券商等归在 金融行业下）
+_SECTOR_ALIAS = {
+    "银行": "金融行业", "券商": "金融行业", "证券": "金融行业", "保险": "金融行业",
+    "信托": "金融行业", "金融": "金融行业", "基金": "金融行业",
+    "半导体": "电子器件", "芯片": "电子器件", "集成电路": "电子器件",
+    "电子": "电子器件", "元器件": "电子器件", "消费电子": "电子器件",
+    "白酒": "酿酒行业", "啤酒": "酿酒行业", "酿酒": "酿酒行业", "红酒": "酿酒行业",
+    "地产": "房地产", "房地产": "房地产", "楼市": "房地产",
+    "钢铁": "钢铁行业", "钢": "钢铁行业",
+    "煤炭": "煤炭行业", "煤": "煤炭行业",
+    "汽车": "汽车制造",
+    "医药": "生物制药", "制药": "生物制药", "生物": "生物制药", "医疗": "生物制药",
+    "化工": "化工行业",
+    "有色": "有色金属", "金属": "有色金属", "稀土": "有色金属",
+    "电力": "电力行业", "发电": "电力行业", "新能源": "电力行业",
+    "水泥": "水泥行业",
+    "食品": "食品行业",
+    "家电": "家电行业",
+    "机械": "机械行业",
+    "纺织": "纺织行业",
+    "造纸": "造纸行业",
+    "石油": "石油行业", "石化": "石油行业",
+    "传媒": "传媒娱乐", "影视": "传媒娱乐", "娱乐": "传媒娱乐",
+    "旅游": "酒店旅游", "酒店": "酒店旅游",
+    "军工": "飞机制造", "飞机": "飞机制造", "无人机": "飞机制造",
+    "船舶": "船舶制造",
+    "环保": "环保行业",
+    "建材": "建筑建材",
+    "农林": "农林牧渔", "农业": "农林牧渔",
+    "化肥": "农药化肥",
+    "塑料": "塑料制品",
+    "家具": "家具行业",
+    "百货": "商业百货", "零售": "商业百货", "商业": "商业百货",
+    "外贸": "物资外贸",
+    "仪表": "仪器仪表",
+    "印刷": "印刷包装",
+    "陶瓷": "陶瓷行业",
+    "公路": "公路桥梁", "桥梁": "公路桥梁", "高速": "公路桥梁",
+    "供水": "供水供气", "供气": "供水供气",
+    "发电设备": "发电设备",
+    "化纤": "化纤行业",
+    "服装": "服装鞋类", "鞋": "服装鞋类",
+    "摩托": "摩托车",
+    "玻璃": "玻璃行业",
+    "综合": "综合行业",
+    "信息": "电子信息",
+}
+
+def get_sector_info(name):
+    """板块详情：优先用新浪行业板块实时数据（成分股数/平均涨跌幅/领涨股，本地可用）。
+    概念板块无新浪数据则返回 found=False，前端引导用户联网查看。
+    新浪板块名带「行业/板块」后缀（如 银行行业），与搜索短名（银行）做归一化匹配；
+    一级行业较粗（银行/券商归在 金融行业），再加别名映射覆盖常见细分词。"""
+    try:
+        boards = _sina_boards_all()
+    except Exception:
+        return {"name": name, "found": False}
+    def _norm(n):
+        return re.sub(r"(行业|板块|概念)$", "", (n or "").strip())
+    tgt = _norm(name)
+    for b in boards:
+        if _norm(b.get("name")) == tgt:
+            return {
+                "name": name, "found": True,
+                "count": b.get("count"), "pct": b.get("pct"),
+                "amount": b.get("amount"),
+                "leaderCode": b.get("leaderCode", ""),
+                "leaderName": b.get("leader", ""),
+            }
+    # 别名映射：常见细分词 → 新浪一级行业
+    for key, sinaname in _SECTOR_ALIAS.items():
+        if key in name or name in key or _norm(name) == _norm(key):
+            for b in boards:
+                if _norm(b.get("name")) == _norm(sinaname):
+                    return {
+                        "name": name, "found": True,
+                        "count": b.get("count"), "pct": b.get("pct"),
+                        "amount": b.get("amount"),
+                        "leaderCode": b.get("leaderCode", ""),
+                        "leaderName": b.get("leader", ""),
+                    }
+    return {"name": name, "found": False}
+
+
+# ================================================================
+#  个股基本资料（点击股票弹窗）
+# ================================================================
+
+def fetch_f10(tx_sym):
+    """东方财富 F10 公司概况；本地常被代理拦截，失败返回 None（前端降级展示）。"""
+    if tx_sym.startswith("sh"):
+        em = "SH" + tx_sym[2:]
+    elif tx_sym.startswith("sz"):
+        em = "SZ" + tx_sym[2:]
+    else:
+        return None
+    url = "https://emweb.securities.eastmoney.com/PC_HSF10/CompanySurvey/PageAjax?code=" + em
+    try:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://emweb.securities.eastmoney.com/"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            d = json.loads(resp.read().decode("utf-8", "ignore"))
+        data = (d.get("data") or {}) if isinstance(d, dict) else {}
+        cs = data.get("CompanySurvey") or {}
+        industry = main = listdate = None
+        # 宽松提取：不同版本键名不一，做关键字匹配
+        pool = {}
+        def walk(o, pre=""):
+            if isinstance(o, dict):
+                for k, v in o.items():
+                    walk(v, pre + "/" + str(k))
+            elif isinstance(o, list):
+                for i, v in enumerate(o):
+                    walk(v, pre + "/" + str(i))
+            else:
+                pool[pre] = o
+        walk(cs)
+        for k, v in pool.items():
+            kl = k.lower()
+            if industry is None and ("hy" in kl or "industry" in kl or "sshymc" in kl):
+                industry = v
+            if main is None and ("zy" in kl and ("fw" in kl or "business" in kl or "yw" in kl or "jyfw" in kl)):
+                main = v
+            if listdate is None and ("ssrq" in kl or "listdate" in kl or "ssr" in kl or "listingdate" in kl):
+                listdate = v
+        return {"industry": industry, "mainBusiness": main, "listingDate": listdate}
+    except Exception:
+        return None
+
+
+def get_stock_info(secid):
+    """个股基本资料：聚合腾讯实时行情字段（名称/价/涨跌/市值/市盈率/52周高低等）
+    + 东方财富F10（行业/主营/上市日期，失败降级）。
+    secid 支持东财格式(1.600519/0.000001/TX:hk00700/TX:usAAPL)与腾讯格式(sh600519)，
+    内部统一转腾讯符号，与 fetch_kline/fetch_trends 行为一致。"""
+    info = {"secid": secid, "name": "", "code": secid,
+            "price": None, "prevClose": None, "open": None, "volume": None,
+            "change": None, "pct": None, "high": None, "low": None,
+            "amount": None, "turnover": None, "amplitude": None,
+            "pe": None, "volratio": None, "floatMv": None, "totalMv": None,
+            "week52High": None, "week52Low": None, "weibi": None, "avg": None,
+            "f10": None}
+    # 东财 secid → 腾讯符号（与 kline/trends 一致）；不支持的市场直接降级返回空资料
+    try:
+        _r = em_to_tx(secid)
+        tx_sym = _r[0] if _r else None
+    except Exception:
+        tx_sym = None
+    if not tx_sym:
+        info["f10"] = None
+        return info
+    try:
+        raw = _tx_get(TX_RT_BASE + tx_sym)
+        m = re.search(r'v_%s="([^"]*)"' % re.escape(tx_sym), raw)
+        if not m:
+            return info
+        p = m.group(1).split("~")
+
+        def f(i):
+            try:
+                return float(p[i]) if i < len(p) and p[i] else None
+            except (ValueError, TypeError):
+                return None
+
+        if len(p) < 6:
+            return info
+        info.update({
+            "name": p[1], "code": p[2], "secid": tx_sym,
+            "price": f(3), "prevClose": f(4), "open": f(5), "volume": f(6),
+            "change": f(31), "pct": f(32), "high": f(33), "low": f(34),
+            "amount": (f(37) * 10000) if f(37) is not None else None,  # 腾讯[37]单位万→元
+            "turnover": f(38),
+            "amplitude": f(43),
+            "pe": f(39),
+            # 腾讯[44]/[45] 为市值（单位：亿元）→ 统一换算成「元」，与 amount 一致
+            "floatMv": (f(44) * 1e8) if f(44) is not None else None,
+            "totalMv": (f(45) * 1e8) if f(45) is not None else None,
+            "volratio": f(46),
+            "week52High": f(47), "week52Low": f(48),
+            "weibi": f(49),
+            "avg": f(51),
+        })
+        # 振幅兜底计算
+        if info["amplitude"] is None and info["high"] and info["low"] and info["prevClose"]:
+            try:
+                info["amplitude"] = round((info["high"] - info["low"]) / info["prevClose"] * 100, 2)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    # F10 公司资料（东方财富，失败降级为 None）
+    info["f10"] = fetch_f10(tx_sym)
+    return info
+
+
+# ================================================================
+#  个股所属板块 + 题材权重（东方财富 push2；本机/公网直连，沙箱可能被代理拦截）
+#  说明：push2 免费接口返回 行业(f136)/概念(f138)/地域(f139)；
+#        概念板的成分权重(f184) 通过逐板 clist 取该股权重，归一化即"题材构成%"。
+# ================================================================
+
+_BOARD_CACHE = {}
+_BOARD_TTL = 300
+
+
+def _to_em_secid_for_board(secid):
+    """转东方财富 push2 格式 secid（1.600667 / 0.000001）。非 A 股返回 None。"""
+    if secid.startswith(("1.", "0.")):
+        return secid
+    if secid.startswith("TX:"):
+        c = secid[3:]
+        if c.startswith("sh"):
+            return "1." + c[2:]
+        if c.startswith("sz"):
+            return "0." + c[2:]
+    return None
+
+
+def _parse_board_str(s):
+    """f138/f139 形如 'BK0735,半导体;BK1033,PCB概念' 或 '半导体;PCB'。返回 [(code,name)]。"""
+    out = []
+    if not s:
+        return out
+    for part in str(s).split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        segs = part.split(",")
+        if len(segs) >= 2:
+            code = segs[0].strip()
+            name = segs[-1].strip()
+        else:
+            code, name = "", part
+        if name:
+            out.append((code, name))
+    return out
+
+
+def get_stock_boards(secid):
+    """个股所属板块 + 题材构成%（归一化）。返回 {found, blocked, industry, region,
+    concepts:[{name,code,weight}], weights:{name:pct}}。push2 不可达时 found=False/blocked=True。"""
+    em = _to_em_secid_for_board(secid)
+    if not em:
+        return {"found": False, "blocked": False, "reason": "仅支持 A 股"}
+    now = time.time()
+    cached = _BOARD_CACHE.get(secid)
+    if cached and now - cached["ts"] < _BOARD_TTL:
+        return cached["data"]
+    try:
+        url = ("https://push2.eastmoney.com/api/qt/stock/get?secid=%s"
+               "&fields=f57,f58,f136,f138,f139,f140&invt=2&fltt=2" % em)
+        req = urllib.request.Request(url, headers={**HEADERS, "Referer": "https://quote.eastmoney.com/"})
+        with urllib.request.urlopen(req, timeout=6) as r:
+            d = json.loads(r.read().decode("utf-8", "ignore"))
+        data = (d.get("data") or {})
+        if not data:
+            res = {"found": False, "blocked": False, "reason": "无板块数据"}
+            _BOARD_CACHE[secid] = {"ts": now, "data": res}
+            return res
+        industry = (data.get("f136") or "").strip()
+        concepts = _parse_board_str(data.get("f138"))
+        region = (data.get("f139") or "").strip()
+        stk_code = (data.get("f57") or em.split(".")[-1])
+
+        # 题材权重：逐概念板取该股成分权重 f184
+        weights = {}
+
+        def _board_weight(cc):
+            code, name = cc
+            try:
+                u = ("https://push2.eastmoney.com/api/qt/clist/get?fs=b:%s"
+                     "&fields=f12,f14,f184&pn=1&pz=500&invt=2&fltt=2" % code)
+                rq = urllib.request.Request(u, headers={**HEADERS, "Referer": "https://quote.eastmoney.com/"})
+                with urllib.request.urlopen(rq, timeout=5) as rr:
+                    j = json.loads(rr.read().decode("utf-8", "ignore"))
+                items = (j.get("data") or {}).get("diff") or []
+                for it in items:
+                    if str(it.get("f12")) == stk_code:
+                        w = it.get("f184")
+                        try:
+                            weights[name] = float(w)
+                        except (TypeError, ValueError):
+                            pass
+                        break
+            except Exception:
+                pass
+
+        coded = [(c, n) for c, n in concepts if c]
+        if coded:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=6) as ex:
+                list(ex.map(_board_weight, coded[:12]))
+        total = sum(weights.values())
+        if total:
+            for k in list(weights):
+                weights[k] = round(weights[k] / total * 100, 1)
+        else:
+            weights.clear()
+        res = {
+            "found": True, "blocked": False,
+            "industry": industry, "region": region,
+            "concepts": [{"name": n, "code": c, "weight": weights.get(n)} for c, n in concepts],
+            "weights": weights,
+        }
+        _BOARD_CACHE[secid] = {"ts": now, "data": res}
+        return res
+    except Exception as e:
+        res = {"found": False, "blocked": True, "reason": str(e)[:80]}
+        _BOARD_CACHE[secid] = {"ts": now, "data": res}
+        return res
 
 
 # ================================================================
@@ -991,6 +1433,32 @@ def remove_watch(secid):
             secids.remove(secid)
         save_config(cfg)
     return cfg
+
+
+# ================================================================
+#  用户持仓（后端持久化，避免依赖浏览器 localStorage 在动态端口下丢失）
+# ================================================================
+
+def load_holdings():
+    try:
+        with open(HOLDINGS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except FileNotFoundError:
+        return []
+    except Exception:
+        return []
+
+
+def save_holdings(lst):
+    """整体覆盖保存持仓列表（前端负责去重/合并），原子写入防止写坏。"""
+    if not isinstance(lst, list):
+        lst = []
+    tmp = HOLDINGS_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(lst, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, HOLDINGS_PATH)
+    return lst
 
 
 # ================================================================
@@ -1178,66 +1646,243 @@ def get_news(src="sina"):
     }
 
 
+# 龙虎榜（真实·东方财富数据中心）：近交易日上榜股票 + 买卖席位 + 净买入额
+_LHB_COLS = ("SECURITY_CODE,SECURITY_NAME_ABBR,SECUCODE,TRADE_DATE,CLOSE_PRICE,CHANGE_RATE,"
+             "TURNOVERRATE,BILLBOARD_BUY_AMT,BILLBOARD_SELL_AMT,BILLBOARD_NET_AMT,EXPLAIN,"
+             "BUY_SEAT,SELL_SEAT,ACCUM_AMOUNT,TRADE_MARKET,"
+             "D1_CLOSE_ADJCHRATE,D5_CLOSE_ADJCHRATE,D10_CLOSE_ADJCHRATE,D20_CLOSE_ADJCHRATE")
 LHB_URL = ("https://datacenter-web.eastmoney.com/api/data/v1/get"
-           "?reportName=RPT_DAILYBILLBOARD_GENERAL"
-           "&columns=SECURITYCODE,SECURITYNAME,EXPLANATION,CLOSEPRICE,CHANGERATE,TURNOVER,TOTALBUY,TOTALSELL,NETBUY"
-           "&pageSize=15&p=1&sortColumns=NETBUY&sortTypes=-1&source=WEB&client=WEB")
+           "?reportName=RPT_DAILYBILLBOARD_DETAILS&columns=%s" % _LHB_COLS)
 _billboard_cache = {"ts": 0, "data": None}
-_billboard_ttl = 60
+_billboard_ttl = 600
 
 
-def get_billboard():
-    """龙虎榜·异动榜：用腾讯全A实时行情，按交易所龙虎榜上榜条件筛选异动股
-    （涨停/接近涨停、高换手、高振幅），本机(Clash)与公网均可用。
-    注：腾讯免费源无席位数据，故不展示净买入额，仅标注异动类型。"""
+def _secucode_to_secid(sc):
+    """SECUCODE 如 002379.SZ / 600721.SH / 8xxxxx.BJ -> 东财 secid 0.002379 / 1.600721"""
+    try:
+        code, mkt = sc.split(".")
+    except Exception:
+        return None
+    if mkt in ("SH", "BJ"):
+        return "1." + code
+    if mkt == "SZ":
+        return "0." + code
+    return None
+
+
+def _fetch_org_net_map(date):
+    """取指定交易日全市场龙虎榜「机构专用席位」净买卖汇总。
+    返回 {code: {buy(元), sell(元), net(元), buy_cnt, sell_cnt}}。
+    机构专用席位判定：OPERATEDEPT_CODE == '0'（operate dept = 机构专用）。
+    席位明细来自 RPT_BILLBOARD_DAILYDETAILSBUY / RPT_BILLBOARD_DAILYDETAILSSELL。
+    失败返回空 dict（不影响主榜单）。"""
+    out = {}
+    try:
+        hd = {"User-Agent": "Mozilla/5.0", "Referer": "https://data.eastmoney.com/"}
+        f = "(TRADE_DATE%%3D'%s')" % date
+        base = ("https://datacenter-web.eastmoney.com/api/data/v1/get"
+                "?reportName=%s&columns=ALL&filter=%s&pageSize=500&source=WEB&client=WEB")
+        for rep, side in (("RPT_BILLBOARD_DAILYDETAILSBUY", "buy"),
+                          ("RPT_BILLBOARD_DAILYDETAILSSELL", "sell")):
+            url = base % (rep, f)
+            req = urllib.request.Request(url, headers=hd)
+            with urllib.request.urlopen(req, timeout=10) as r:
+                js = json.loads(r.read().decode("utf-8", "ignore"))
+            rows = (js.get("result") or {}).get("data") or []
+            for row in rows:
+                if str(row.get("OPERATEDEPT_CODE", "")) != "0":
+                    continue
+                code = row.get("SECURITY_CODE") or ""
+                if not code:
+                    continue
+                e = out.setdefault(code, {"buy": 0.0, "sell": 0.0, "buy_cnt": 0, "sell_cnt": 0})
+                if side == "buy":
+                    e["buy"] += float(row.get("BUY") or 0)
+                    e["buy_cnt"] += 1
+                else:
+                    e["sell"] += float(row.get("SELL") or 0)
+                    e["sell_cnt"] += 1
+        for v in out.values():
+            v["net"] = v["buy"] - v["sell"]
+    except Exception:
+        return {}
+    return out
+
+
+def _fetch_real_billboard(date=None):
+    """取真实龙虎榜。date 为指定交易日(YYYY-MM-DD)时只取该日；否则倒序试最近 12 个自然日。
+    返回 (date_str, [items]) 或 (None, [])。
+    items 字段：secid/code/name/pct/net(元)/buy(元)/sell(元)/turnover/reason/
+               org_net(元)/org_buy/org_sell/org_buy_cnt/org_sell_cnt/d1/d5/d10/d20/market。"""
+    hd = {"User-Agent": "Mozilla/5.0", "Referer": "https://data.eastmoney.com/"}
+    if date:
+        dates = [date]
+    else:
+        today = datetime.date.today()
+        dates = [ (today - datetime.timedelta(days=off)).strftime("%Y-%m-%d") for off in range(0, 12) ]
+    for d in dates:
+        url = (LHB_URL + "&filter=(TRADE_DATE%%3D'%s')&pageSize=20"
+               "&sortColumns=BILLBOARD_NET_AMT&sortTypes=-1&source=WEB&client=WEB" % d)
+        try:
+            req = urllib.request.Request(url, headers=hd)
+            with urllib.request.urlopen(req, timeout=8) as r:
+                js = json.loads(r.read().decode("utf-8", "ignore"))
+            res = js.get("result")
+            if not res or not res.get("data"):
+                if date:
+                    return d, []          # 指定日期无数据，直接返回空
+                continue
+            org = _fetch_org_net_map(d)
+            items = []
+            for it in res["data"]:
+                sc = it.get("SECUCODE") or ""
+                code = it.get("SECURITY_CODE") or ""
+                o = org.get(code) or {}
+                items.append({
+                    "secid": _secucode_to_secid(sc),
+                    "code": code,
+                    "name": it.get("SECURITY_NAME_ABBR") or code or "",
+                    "pct": it.get("CHANGE_RATE"),
+                    "net": it.get("BILLBOARD_NET_AMT"),        # 元
+                    "buy": it.get("BILLBOARD_BUY_AMT"),         # 元
+                    "sell": it.get("BILLBOARD_SELL_AMT"),       # 元
+                    "turnover": it.get("TURNOVERRATE"),
+                    "reason": it.get("EXPLAIN") or "",
+                    "buySeat": it.get("BUY_SEAT"),
+                    "sellSeat": it.get("SELL_SEAT"),
+                    "market": it.get("TRADE_MARKET") or "",
+                    "org_net": o.get("net"),
+                    "org_buy": o.get("buy"),
+                    "org_sell": o.get("sell"),
+                    "org_buy_cnt": o.get("buy_cnt"),
+                    "org_sell_cnt": o.get("sell_cnt"),
+                    "d1": it.get("D1_CLOSE_ADJCHRATE"),
+                    "d5": it.get("D5_CLOSE_ADJCHRATE"),
+                    "d10": it.get("D10_CLOSE_ADJCHRATE"),
+                    "d20": it.get("D20_CLOSE_ADJCHRATE"),
+                })
+            return d, items
+        except Exception:
+            if date:
+                return d, []
+            continue
+    return None, []
+
+
+def _tx_anomaly_billboard():
+    """降级：腾讯全A实时行情按异动条件（涨停/高换手/高振幅）筛选。"""
+    quotes = _tx_all_quotes()
+    items = []
+    if not quotes:
+        return items
+    for code, it in quotes.items():
+        if not isinstance(it, dict) or it.get("error"):
+            continue
+        if not code.startswith(("sh", "sz")):   # 剔除北交所
+            continue
+        price = it.get("price"); prev = it.get("prevClose"); pct = it.get("pct")
+        if pct is None and price and prev:
+            try:
+                pct = (price - prev) / prev * 100
+            except Exception:
+                pct = None
+        high = it.get("high"); low = it.get("low"); turnover = it.get("turnover")
+        reasons = []
+        if pct is not None and pct >= 9.5:
+            reasons.append("涨停")
+        if turnover is not None and turnover >= 15:
+            reasons.append("高换手%d%%" % round(turnover))
+        amp = None
+        if high and low and prev:
+            try:
+                amp = (high - low) / prev * 100
+            except Exception:
+                amp = None
+        if amp is not None and amp >= 15:
+            reasons.append("高振幅%d%%" % round(amp))
+        if not reasons:
+            continue
+        items.append({
+            "secid": None, "code": code, "name": it.get("name", code),
+            "pct": round(pct, 2) if pct is not None else None,
+            "net": None, "buy": None, "sell": None,
+            "turnover": turnover, "reason": " · ".join(reasons),
+            "buySeat": None, "sellSeat": None, "market": "",
+        })
+    items.sort(key=lambda x: (0 if "涨停" in x["reason"] else 1, -(x["pct"] or 0)))
+    return items[:15]
+
+
+def get_billboard(date=None):
+    """龙虎榜：优先真实东方财富（含席位净买入），失败/盘中无数据降级为腾讯异动榜。
+    指定 date(YYYY-MM-DD) 时只取该交易日（不走缓存）。
+    返回 {type:'real'|'proxy', date, items}。"""
+    if date:
+        try:
+            d, items = _fetch_real_billboard(date)
+            if items:
+                return {"type": "real", "date": d, "items": items}
+        except Exception:
+            pass
+        return {"type": "real", "date": date, "items": []}
     now = time.time()
     c = _billboard_cache
     if c["data"] is not None and now - c["ts"] < _billboard_ttl:
         return c["data"]
-    quotes = _tx_all_quotes()
-    items = []
-    if quotes:
-        for code, it in quotes.items():
-            if not isinstance(it, dict) or it.get("error"):
-                continue
-            if not code.startswith(("sh", "sz")):   # 剔除北交所
-                continue
-            price = it.get("price"); prev = it.get("prevClose")
-            pct = it.get("pct")
-            if pct is None and price and prev:
-                try:
-                    pct = (price - prev) / prev * 100
-                except Exception:
-                    pct = None
-            high = it.get("high"); low = it.get("low"); turnover = it.get("turnover")
-            reasons = []
-            if pct is not None and pct >= 9.5:
-                reasons.append("涨停")
-            if turnover is not None and turnover >= 15:
-                reasons.append("高换手%d%%" % round(turnover))
-            amp = None
-            if high and low and prev:
-                try:
-                    amp = (high - low) / prev * 100
-                except Exception:
-                    amp = None
-            if amp is not None and amp >= 15:
-                reasons.append("高振幅%d%%" % round(amp))
-            if not reasons:
-                continue
-            items.append({
-                "code": code, "name": it.get("name", code),
-                "reason": " · ".join(reasons),
-                "pct": round(pct, 2) if pct is not None else None,
-                "net": None, "buy": None, "sell": None, "close": price,
-            })
-        # 涨停优先，其次按涨跌幅降序
-        items.sort(key=lambda x: (0 if "涨停" in x["reason"] else 1, -(x["pct"] or 0)))
-        items = items[:15]
-    res = items if items else None
-    _billboard_cache["ts"] = now
-    _billboard_cache["data"] = res
+    try:
+        d, items = _fetch_real_billboard()
+        if items:
+            res = {"type": "real", "date": d, "items": items}
+            _billboard_cache.update(ts=now, data=res)
+            return res
+    except Exception:
+        pass
+    items = _tx_anomaly_billboard()
+    res = {"type": "proxy", "date": None, "items": items}
+    _billboard_cache.update(ts=now, data=res)
     return res
+
+
+def get_stock_lhb_history(code, look_back=45):
+    """个股近 N 日龙虎榜记录（带上榜后 N 日涨跌率）。
+    返回 {code, count, records:[{date, pct, net(元), reason, d1,d5,d10,d20}]}，按日期倒序。
+    用于弹窗「点开看上榜后 N 日涨跌」。失败返回 {code, count:0, records:[]}。"""
+    try:
+        code = str(code).strip()
+        if not code:
+            return {"code": code, "count": 0, "records": []}
+        end = datetime.date.today()
+        start = end - datetime.timedelta(days=look_back)
+        today_str = end.strftime("%Y-%m-%d")
+        start_str = start.strftime("%Y-%m-%d")
+        cols = ("SECURITY_CODE,TRADE_DATE,CHANGE_RATE,BILLBOARD_NET_AMT,EXPLANATION,"
+                "D1_CLOSE_ADJCHRATE,D5_CLOSE_ADJCHRATE,D10_CLOSE_ADJCHRATE,D20_CLOSE_ADJCHRATE")
+        url = ("https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_DAILYBILLBOARD_DETAILS"
+               "&columns=%s"
+               "&filter=(TRADE_DATE%%3E%%3D'%s')(TRADE_DATE%%3C%%3D'%s')(SECURITY_CODE%%3D%%22%s%%22)"
+               "&pageSize=30&sortColumns=TRADE_DATE&sortTypes=-1&source=WEB&client=WEB"
+               % (cols, start_str, today_str, code))
+        hd = {"User-Agent": "Mozilla/5.0", "Referer": "https://data.eastmoney.com/"}
+        req = urllib.request.Request(url, headers=hd)
+        with urllib.request.urlopen(req, timeout=10) as r:
+            js = json.loads(r.read().decode("utf-8", "ignore"))
+        rows = (js.get("result") or {}).get("data") or []
+        recs = []
+        for it in rows:
+            td = str(it.get("TRADE_DATE") or "")[:10]
+            recs.append({
+                "date": td,
+                "pct": it.get("CHANGE_RATE"),
+                "net": it.get("BILLBOARD_NET_AMT"),
+                "reason": it.get("EXPLANATION") or "",
+                "d1": it.get("D1_CLOSE_ADJCHRATE"),
+                "d5": it.get("D5_CLOSE_ADJCHRATE"),
+                "d10": it.get("D10_CLOSE_ADJCHRATE"),
+                "d20": it.get("D20_CLOSE_ADJCHRATE"),
+            })
+        return {"code": code, "count": len(recs), "records": recs}
+    except Exception as e:
+        return {"code": str(code), "count": 0, "records": [], "error": str(e)}
 
 
 # ================================================================
@@ -1292,7 +1937,7 @@ def build_state():
     return {
         "ts": int(time.time() * 1000),
         "version": VERSION,
-        "title": cfg.get("title", "实时行情看板"),
+        "title": cfg.get("title", "实时行情看板 · 詹姆斯是goat"),
         "refreshSeconds": cfg.get("refreshSeconds", 3),
         "market": {"label": cfg.get("market", {}).get("label", "大盘指数"), "items": market_items},
         "watchlist": {"label": cfg.get("watchlist", {}).get("label", "自选股"), "items": watch_items},
@@ -1362,6 +2007,18 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._json({"error": str(e)})
             return
+        if path == "/api/holdings":
+            try:
+                self._json({"items": load_holdings()})
+            except Exception as e:
+                self._json({"error": str(e)})
+            return
+        if path == "/api/anomaly":
+            try:
+                self._json(get_anomaly())
+            except Exception as e:
+                self._json({"error": str(e)})
+            return
         if path == "/api/rank":
             try:
                 self._json(get_rank())
@@ -1389,7 +2046,33 @@ class Handler(BaseHTTPRequestHandler):
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             q = (qs.get("q") or [""])[0]
             try:
-                self._json({"q": q, "items": search_stock(q) if q else []})
+                res = search_stock(q) if q else {"stocks": [], "sectors": []}
+                self._json({"q": q, "items": res.get("stocks", []),
+                            "sectors": res.get("sectors", []) if q else []})
+            except Exception as e:
+                self._json({"error": str(e)})
+            return
+        if path == "/api/stock_info":
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            code = (qs.get("code") or [""])[0]
+            try:
+                self._json({"info": get_stock_info(code)})
+            except Exception as e:
+                self._json({"error": str(e)})
+            return
+        if path == "/api/stock_boards":
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            code = (qs.get("code") or [""])[0]
+            try:
+                self._json(get_stock_boards(code))
+            except Exception as e:
+                self._json({"found": False, "blocked": True, "reason": str(e)[:80]})
+            return
+        if path == "/api/sector":
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            name = (qs.get("name") or [""])[0]
+            try:
+                self._json(get_sector_info(name))
             except Exception as e:
                 self._json({"error": str(e)})
             return
@@ -1410,11 +2093,21 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": str(e)})
             return
         if path == "/api/billboard":
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            bdate = (qs.get("date") or [None])[0]
             try:
-                items = get_billboard()
-                self._json({"items": items or [], "error": None if items else "龙虎榜暂不可用（数据源受限）"})
+                d = get_billboard(bdate)
+                self._json(d or {"type": "proxy", "date": None, "items": []})
             except Exception as e:
-                self._json({"error": str(e)})
+                self._json({"type": "proxy", "date": None, "items": [], "error": str(e)})
+            return
+        if path == "/api/stock_lhb":
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            code = (qs.get("code") or [""])[0]
+            try:
+                self._json(get_stock_lhb_history(code))
+            except Exception as e:
+                self._json({"code": code, "count": 0, "records": [], "error": str(e)})
             return
         self._send(404, "not found")
 
@@ -1453,6 +2146,27 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True, "secids": new_order})
             else:
                 self._json({"ok": False, "msg": "missing secids"})
+            return
+        if path == "/api/holdings":
+            items = payload.get("items")
+            if isinstance(items, list):
+                # 清洗字段，防止前端误传脏数据写坏文件
+                clean = []
+                for it in items:
+                    if not isinstance(it, dict) or not it.get("code"):
+                        continue
+                    clean.append({
+                        "code": str(it.get("code")),
+                        "name": it.get("name") or "",
+                        "cost": float(it.get("cost") or 0),
+                        "qty": float(it.get("qty") or 0),
+                        "note": it.get("note") or "",
+                        "secid": it.get("secid") or "",
+                    })
+                save_holdings(clean)
+                self._json({"ok": True, "items": clean})
+            else:
+                self._json({"ok": True, "items": load_holdings()})
             return
         self._send(404, "not found")
 
@@ -1507,9 +2221,9 @@ def main():
     shown = "127.0.0.1" if host == "0.0.0.0" else host
     url = f"http://{shown}:{port}/"
     try:
-        app_title = load_config().get("title", "实时行情看板")
+        app_title = load_config().get("title", "实时行情看板 · 詹姆斯是goat")
     except Exception:
-        app_title = "实时行情看板"
+        app_title = "实时行情看板 · 詹姆斯是goat"
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
 

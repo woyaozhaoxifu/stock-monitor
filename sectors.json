@@ -1,0 +1,790 @@
+[
+{
+"code": "new_blhy",
+"name": "玻璃行业"
+},
+{
+"code": "new_cbzz",
+"name": "船舶制造"
+},
+{
+"code": "new_cmyl",
+"name": "传媒娱乐"
+},
+{
+"code": "new_dlhy",
+"name": "电力行业"
+},
+{
+"code": "new_dqhy",
+"name": "电器行业"
+},
+{
+"code": "new_dzqj",
+"name": "电子器件"
+},
+{
+"code": "new_dzxx",
+"name": "电子信息"
+},
+{
+"code": "new_fdc",
+"name": "房地产"
+},
+{
+"code": "new_fdsb",
+"name": "发电设备"
+},
+{
+"code": "new_fjzz",
+"name": "飞机制造"
+},
+{
+"code": "new_fzhy",
+"name": "纺织行业"
+},
+{
+"code": "new_fzjx",
+"name": "纺织机械"
+},
+{
+"code": "new_fzxl",
+"name": "服装鞋类"
+},
+{
+"code": "new_glql",
+"name": "公路桥梁"
+},
+{
+"code": "new_gsgq",
+"name": "供水供气"
+},
+{
+"code": "new_gthy",
+"name": "钢铁行业"
+},
+{
+"code": "new_hbhy",
+"name": "环保行业"
+},
+{
+"code": "new_hghy",
+"name": "化工行业"
+},
+{
+"code": "new_hqhy",
+"name": "化纤行业"
+},
+{
+"code": "new_jdhy",
+"name": "家电行业"
+},
+{
+"code": "new_jdly",
+"name": "酒店旅游"
+},
+{
+"code": "new_jjhy",
+"name": "家具行业"
+},
+{
+"code": "new_jrhy",
+"name": "金融行业"
+},
+{
+"code": "new_jtys",
+"name": "交通运输"
+},
+{
+"code": "new_jxhy",
+"name": "机械行业"
+},
+{
+"code": "new_jzjc",
+"name": "建筑建材"
+},
+{
+"code": "new_kfq",
+"name": "开发区"
+},
+{
+"code": "new_ljhy",
+"name": "酿酒行业"
+},
+{
+"code": "new_mtc",
+"name": "摩托车"
+},
+{
+"code": "new_mthy",
+"name": "煤炭行业"
+},
+{
+"code": "new_nlmy",
+"name": "农林牧渔"
+},
+{
+"code": "new_nyhf",
+"name": "农药化肥"
+},
+{
+"code": "new_qczz",
+"name": "汽车制造"
+},
+{
+"code": "new_qtxy",
+"name": "其它行业"
+},
+{
+"code": "new_slzp",
+"name": "塑料制品"
+},
+{
+"code": "new_snhy",
+"name": "水泥行业"
+},
+{
+"code": "new_sphy",
+"name": "食品行业"
+},
+{
+"code": "new_stock",
+"name": "次新股"
+},
+{
+"code": "new_swzz",
+"name": "生物制药"
+},
+{
+"code": "new_sybh",
+"name": "商业百货"
+},
+{
+"code": "new_syhy",
+"name": "石油行业"
+},
+{
+"code": "new_tchy",
+"name": "陶瓷行业"
+},
+{
+"code": "new_wzwm",
+"name": "物资外贸"
+},
+{
+"code": "new_ylqx",
+"name": "医疗器械"
+},
+{
+"code": "new_yqyb",
+"name": "仪器仪表"
+},
+{
+"code": "new_ysbz",
+"name": "印刷包装"
+},
+{
+"code": "new_ysjs",
+"name": "有色金属"
+},
+{
+"code": "new_zhhy",
+"name": "综合行业"
+},
+{
+"code": "new_zzhy",
+"name": "造纸行业"
+},
+{
+"code": "",
+"name": "锂电池"
+},
+{
+"code": "",
+"name": "半导体"
+},
+{
+"code": "",
+"name": "芯片"
+},
+{
+"code": "",
+"name": "集成电路"
+},
+{
+"code": "",
+"name": "人工智能"
+},
+{
+"code": "",
+"name": "AI"
+},
+{
+"code": "",
+"name": "新能源"
+},
+{
+"code": "",
+"name": "光伏"
+},
+{
+"code": "",
+"name": "风电"
+},
+{
+"code": "",
+"name": "储能"
+},
+{
+"code": "",
+"name": "白酒"
+},
+{
+"code": "",
+"name": "医药"
+},
+{
+"code": "",
+"name": "医疗"
+},
+{
+"code": "",
+"name": "券商"
+},
+{
+"code": "",
+"name": "银行"
+},
+{
+"code": "",
+"name": "保险"
+},
+{
+"code": "",
+"name": "军工"
+},
+{
+"code": "",
+"name": "航天"
+},
+{
+"code": "",
+"name": "5G"
+},
+{
+"code": "",
+"name": "6G"
+},
+{
+"code": "",
+"name": "华为"
+},
+{
+"code": "",
+"name": "特斯拉"
+},
+{
+"code": "",
+"name": "新能源汽车"
+},
+{
+"code": "",
+"name": "充电桩"
+},
+{
+"code": "",
+"name": "车联网"
+},
+{
+"code": "",
+"name": "无人驾驶"
+},
+{
+"code": "",
+"name": "智能驾驶"
+},
+{
+"code": "",
+"name": "创投"
+},
+{
+"code": "",
+"name": "一带一路"
+},
+{
+"code": "",
+"name": "雄安新区"
+},
+{
+"code": "",
+"name": "上海自贸区"
+},
+{
+"code": "",
+"name": "区块链"
+},
+{
+"code": "",
+"name": "大数据"
+},
+{
+"code": "",
+"name": "云计算"
+},
+{
+"code": "",
+"name": "物联网"
+},
+{
+"code": "",
+"name": "工业互联网"
+},
+{
+"code": "",
+"name": "机器人"
+},
+{
+"code": "",
+"name": "无人机"
+},
+{
+"code": "",
+"name": "智慧城市"
+},
+{
+"code": "",
+"name": "智能家居"
+},
+{
+"code": "",
+"name": "在线教育"
+},
+{
+"code": "",
+"name": "远程办公"
+},
+{
+"code": "",
+"name": "口罩"
+},
+{
+"code": "",
+"name": "疫苗"
+},
+{
+"code": "",
+"name": "创新药"
+},
+{
+"code": "",
+"name": "医美"
+},
+{
+"code": "",
+"name": "养老"
+},
+{
+"code": "",
+"name": "黄金"
+},
+{
+"code": "",
+"name": "稀土永磁"
+},
+{
+"code": "",
+"name": "石墨烯"
+},
+{
+"code": "",
+"name": "燃料电池"
+},
+{
+"code": "",
+"name": "氢能源"
+},
+{
+"code": "",
+"name": "OLED"
+},
+{
+"code": "",
+"name": "MiniLED"
+},
+{
+"code": "",
+"name": "MicroLED"
+},
+{
+"code": "",
+"name": "氮化镓"
+},
+{
+"code": "",
+"name": "第三代半导体"
+},
+{
+"code": "",
+"name": "数字经济"
+},
+{
+"code": "",
+"name": "东数西算"
+},
+{
+"code": "",
+"name": "数据中心"
+},
+{
+"code": "",
+"name": "元宇宙"
+},
+{
+"code": "",
+"name": "虚拟现实"
+},
+{
+"code": "",
+"name": "VR"
+},
+{
+"code": "",
+"name": "AR"
+},
+{
+"code": "",
+"name": "NFT"
+},
+{
+"code": "",
+"name": "电子身份证"
+},
+{
+"code": "",
+"name": "数字货币"
+},
+{
+"code": "",
+"name": "跨境支付"
+},
+{
+"code": "",
+"name": "数字人民币"
+},
+{
+"code": "",
+"name": "供销社"
+},
+{
+"code": "",
+"name": "免税"
+},
+{
+"code": "",
+"name": "啤酒"
+},
+{
+"code": "",
+"name": "食品饮料"
+},
+{
+"code": "",
+"name": "猪肉"
+},
+{
+"code": "",
+"name": "农业"
+},
+{
+"code": "",
+"name": "种业"
+},
+{
+"code": "",
+"name": "化肥"
+},
+{
+"code": "",
+"name": "化工"
+},
+{
+"code": "",
+"name": "钢铁"
+},
+{
+"code": "",
+"name": "煤炭"
+},
+{
+"code": "",
+"name": "水泥"
+},
+{
+"code": "",
+"name": "建筑"
+},
+{
+"code": "",
+"name": "建材"
+},
+{
+"code": "",
+"name": "工程机械"
+},
+{
+"code": "",
+"name": "电力"
+},
+{
+"code": "",
+"name": "环保"
+},
+{
+"code": "",
+"name": "水务"
+},
+{
+"code": "",
+"name": "燃气"
+},
+{
+"code": "",
+"name": "港口"
+},
+{
+"code": "",
+"name": "航运"
+},
+{
+"code": "",
+"name": "高速公路"
+},
+{
+"code": "",
+"name": "物流"
+},
+{
+"code": "",
+"name": "电商"
+},
+{
+"code": "",
+"name": "网红经济"
+},
+{
+"code": "",
+"name": "直播"
+},
+{
+"code": "",
+"name": "网络游戏"
+},
+{
+"code": "",
+"name": "影视传媒"
+},
+{
+"code": "",
+"name": "文化传媒"
+},
+{
+"code": "",
+"name": "旅游"
+},
+{
+"code": "",
+"name": "酒店"
+},
+{
+"code": "",
+"name": "航空机场"
+},
+{
+"code": "",
+"name": "互联金融"
+},
+{
+"code": "",
+"name": "移动支付"
+},
+{
+"code": "",
+"name": "国产软件"
+},
+{
+"code": "",
+"name": "网络安全"
+},
+{
+"code": "",
+"name": "操作系统"
+},
+{
+"code": "",
+"name": "信创"
+},
+{
+"code": "",
+"name": "数据安全"
+},
+{
+"code": "",
+"name": "算力"
+},
+{
+"code": "",
+"name": "CPO"
+},
+{
+"code": "",
+"name": "光模块"
+},
+{
+"code": "",
+"name": "英伟达概念"
+},
+{
+"code": "",
+"name": "苹果概念"
+},
+{
+"code": "",
+"name": "小米概念"
+},
+{
+"code": "",
+"name": "柔性屏"
+},
+{
+"code": "",
+"name": "PCB"
+},
+{
+"code": "",
+"name": "传感器"
+},
+{
+"code": "",
+"name": "边缘计算"
+},
+{
+"code": "",
+"name": "脑机接口"
+},
+{
+"code": "",
+"name": "人形机器人"
+},
+{
+"code": "",
+"name": "固态电池"
+},
+{
+"code": "",
+"name": "钠离子电池"
+},
+{
+"code": "",
+"name": "钒电池"
+},
+{
+"code": "",
+"name": "医废处理"
+},
+{
+"code": "",
+"name": "垃圾分类"
+},
+{
+"code": "",
+"name": "PPP"
+},
+{
+"code": "",
+"name": "乡村振兴"
+},
+{
+"code": "",
+"name": "土地流转"
+},
+{
+"code": "",
+"name": "草甘膦"
+},
+{
+"code": "",
+"name": "磷化工"
+},
+{
+"code": "",
+"name": "钛白粉"
+},
+{
+"code": "",
+"name": "有机硅"
+},
+{
+"code": "",
+"name": "氟化工"
+},
+{
+"code": "",
+"name": "PVDF"
+},
+{
+"code": "",
+"name": "碳纤维"
+},
+{
+"code": "",
+"name": "面板"
+},
+{
+"code": "",
+"name": "家电"
+},
+{
+"code": "",
+"name": "汽车整车"
+},
+{
+"code": "",
+"name": "汽车零部件"
+},
+{
+"code": "",
+"name": "轮胎"
+},
+{
+"code": "",
+"name": "纺织服装"
+},
+{
+"code": "",
+"name": "造纸"
+},
+{
+"code": "",
+"name": "包装印刷"
+},
+{
+"code": "",
+"name": "零售"
+},
+{
+"code": "",
+"name": "免税店"
+},
+{
+"code": "",
+"name": "预制菜"
+},
+{
+"code": "",
+"name": "社区团购"
+},
+{
+"code": "",
+"name": "冷链物流"
+}
+]

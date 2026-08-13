@@ -1159,7 +1159,7 @@ function renderStockInfo(info) {
       </div>
       <div id="infoKline" class="info-kline"></div>
     </div>
-    <div class="kline-cap">支撑/压力 · 近期高低 · 枢轴点 · 均线MA · 密集成交 多法共振，标注置信度 高 / 中 / 低；分时=当日走势，日/周/月K可自绘趋势线；底部滚动条拖动或鼠标滚轮可横向平移 K 线</div>
+    <div class="kline-cap">支撑/压力 · 近期高低 · 枢轴点 · 均线MA · 密集成交 多法共振，标注置信度 高 / 中 / 低；分时=当日走势，日/周/月K可自绘趋势线；鼠标滚轮缩放，拖动图表或底部滚动条可横向平移 K 线</div>
     <div class="info-grid">
       ${cell("最新价", fmtPrice(info.price), dc)}
       ${cell("涨跌额", fmtChange(info.change), dc)}
@@ -1334,7 +1334,8 @@ function renderInfoKline() {
   }, true);
   infoKlineChart.resize();
   // 个股详情放大 K 线：鼠标滚轮横向平移；底部滚动条拖动亦可平移
-  infoKlineChart.setOption({ dataZoom: [{ type: "inside", xAxisIndex: [0, 1], zoomOnMouseWheel: false, moveOnMouseWheel: true, throttle: 30 }] });
+  // 个股详情放大 K 线：鼠标滚轮缩放（放大/缩小）；横向平移用 拖动图表 或 底部滚动条
+  infoKlineChart.setOption({ dataZoom: [{ type: "inside", xAxisIndex: [0, 1], zoomOnMouseWheel: true, moveOnMouseWheel: false, throttle: 30 }] });
 }
 function bindInfoDraw() {
   infoKlineChart.getZr().on("click", function (e) {

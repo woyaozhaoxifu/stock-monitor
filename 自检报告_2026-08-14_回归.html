@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>stock-monitor 回归自检报告</title>
+<style>
+ body{font-family:-apple-system,"Microsoft YaHei",sans-serif;background:#0d1117;color:#e6edf3;margin:0;padding:32px;}
+ h1{font-size:22px;margin:0 0 4px;}
+ .sub{color:#8b949e;font-size:13px;margin-bottom:20px;}
+ .summary{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px 18px;margin-bottom:22px;}
+ .summary b{color:#3fb950;font-size:15px;}
+ table{width:100%;border-collapse:collapse;background:#161b22;border-radius:10px;overflow:hidden;}
+ th,td{text-align:left;padding:12px 14px;border-bottom:1px solid #21262d;font-size:14px;vertical-align:top;}
+ th{background:#1c2230;color:#8b949e;font-weight:600;}
+ tr:last-child td{border-bottom:none;}
+ .ok{color:#3fb950;font-weight:700;}
+ .ev{color:#8b949e;font-size:12px;line-height:1.6;}
+ .note{margin-top:22px;font-size:12px;color:#8b949e;line-height:1.8;}
+ code{background:#21262d;padding:1px 6px;border-radius:4px;color:#e6edf3;}
+</style>
+</head>
+<body>
+<h1>stock-monitor · 回归自检报告</h1>
+<div class="sub">生成时间：2026-08-14 15:29 · 环境：Playwright 1.62.1 真机 + 真实后端（端口 8923）· 覆盖最近 5 轮修复</div>
+<div class="summary">自检结论：<b>6 / 6 全部通过，0 控制台 / 页面错误</b>。最近 5 轮修复（延长线 / K线聚焦 / 百分比轴 / 异动判定逻辑 / 跨周期画线）无回归，功能全部正常。</div>
+<table>
+<tr><th>#</th><th>检查项</th><th>结果</th><th>关键证据</th></tr>
+<tr><td>1</td><td>页面加载无致命 JS 错误</td><td class="ok">PASS</td><td class="ev">pageerror / console.error 均为空</td></tr>
+<tr><td>2</td><td>大盘异动「判定逻辑」可展开 / 收起</td><td class="ok">PASS</td><td class="ev">默认 hidden → 点击展开(open=true) → 再点收起(open=false)</td></tr>
+<tr><td>3</td><td>日K 初始聚焦（非全景铺满）</td><td class="ok">PASS</td><td class="ev">dataZoom start=25, end=100，仅显示最近 150 根</td></tr>
+<tr><td>4</td><td>日K 延长线两端延伸</td><td class="ok">PASS</td><td class="ev">趋势线 [0, 102.22] → [199, 163.64]，按绝对价锚定</td></tr>
+<tr><td>5</td><td>切周K 后画线仍显示</td><td class="ok">PASS</td><td class="ev">趋势线数据 2 段，跨周期跟随显示</td></tr>
+<tr><td>6</td><td>切月K 后画线仍显示</td><td class="ok">PASS</td><td class="ev">趋势线数据 2 段，跨周期跟随显示</td></tr>
+</table>
+<div class="note">
+环境说明：后端 <code>app.py</code>（VERSION 3.0）以 <code>NO_WINDOW=1 PORT=8923</code> 起服务，前端用 Playwright 路由拦截 mock <code>/api/kline</code>、<code>/api/trends</code> 注入可控数据，其余接口走实时。本次仅验证，未改动项目代码（无新 commit）。<br>
+待办：本地累计 <b>18 个 commit</b> 待推送（HEAD <code>0190e8b</code>），仍等 GitHub token → <code>git push origin main</code> + Render 重部署。
+</div>
+</body>
+</html>

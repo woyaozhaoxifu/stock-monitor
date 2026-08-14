@@ -18,6 +18,9 @@ import collections
 import concurrent.futures
 import threading
 import webbrowser
+import sys
+import atexit
+import tempfile
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -57,7 +60,11 @@ _breadth_cache = {"ts": 0, "data": None}
 _breadth_ttl = 30
 _boards_cache = {"ts": 0, "data": None}   # 新浪行业板块原始数据（板块榜+涨跌家数共用）
 _boards_ttl = 15
+_em_boards_cache = {"ts": 0, "data": None}   # 东财行业+概念板块（具体题材板块）
 _kline_sym_cache = {}                     # 腾讯行情代码 → K线接口实际可用的代码形式
+_preclose_cache = {}                        # 代码 → 昨收价（用于分时 / K线百分比轴）
+_kline_cache = {}                          # (tx_sym, period, count) → {"ts":.., "rows":..} 短缓存，降低腾讯并发压力
+_kline_ttl = 60
 _yvol_cache = {}                           # 昨日成交量(手) 缓存：tx_sym → volume（每日仅变一次）
 
 # 板块数据源（新浪财经行业板块，国内直连，无需代理）
@@ -129,12 +136,17 @@ def em_to_tx(secid):
     if secid.startswith("TX:"):
         return secid[3:], None  # 已经是腾讯格式
 
+    # 东财格式：1.XXXXX(沪) / 0.XXXXX(深)
     if secid.startswith("1."):
         code = secid[2:]
         return f"sh{code}", None
     if secid.startswith("0."):
         code = secid[2:]
         return f"sz{code}", None
+
+    # 腾讯直传格式：shXXXXX / szXXXXX（前端点击股票时直接传此格式）
+    if secid.startswith("sh") or secid.startswith("sz"):
+        return secid, None
 
     # 美股指数
     us_idx_map = {
@@ -365,13 +377,21 @@ def fetch_quotes(secids):
 # ================================================================
 
 def _kline_once(sym, period, count):
-    """请求一次K线并解析为列表；拿不到就返回空列表（不抛异常，便于多候选试探）。"""
+    """请求一次K线并解析为列表；拿不到就返回空列表（不抛异常，便于多候选试探）。
+    腾讯对并发请求会限流/偶发超时，这里做最多 3 次重试 + 退避，显著提升取数成功率。"""
     url = f"{TX_KLINE_BASE}?param={sym},{period},,,{count},qfq"
-    try:
-        req = urllib.request.Request(url, headers={**HEADERS, "Referer": "https://finance.qq.com/"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-    except Exception:
+    last_err = None
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(url, headers={**HEADERS, "Referer": "https://finance.qq.com/"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            break
+        except Exception as e:
+            last_err = e
+            if attempt < 2:
+                time.sleep(0.4 * (attempt + 1))   # 0.4s / 0.8s 退避
+    else:
         return []
 
     # 腾讯返回结构：data → {代码: {"day": [[日期,开,收,高,低,量], ...], "qt": ...}}
@@ -385,6 +405,16 @@ def _kline_once(sym, period, count):
                 node_obj = v
                 break
     node_obj = node_obj or {}
+
+    # 提取昨收（用于K线百分比轴）：腾讯 qt 实时块 [4]=昨收
+    pre_close = None
+    try:
+        _qt = node_obj.get("qt") or {}
+        _qarr = _qt.get(sym) if isinstance(_qt, dict) else None
+        if isinstance(_qarr, list) and len(_qarr) > 4:
+            pre_close = float(_qarr[4])
+    except (ValueError, TypeError, AttributeError):
+        pre_close = None
 
     # 周期字段名：不复权 day/week/month，复权 qfqday/qfqweek/qfqmonth
     node = []
@@ -414,7 +444,7 @@ def _kline_once(sym, period, count):
                 })
         except (TypeError, ValueError, KeyError):
             continue
-    return out
+    return out, pre_close
 
 
 def _kline_candidates(tx_sym):
@@ -442,20 +472,73 @@ def fetch_kline(secid, klt="101"):
         return []
     tx_sym = r[0]
 
+    # 短缓存：同一标的同周期 60s 内直接返回，既加速又压低腾讯并发（避免被限流导致 K线取不到）
+    cache_key = (tx_sym, period, count)
+    now = time.time()
+    c = _kline_cache.get(cache_key)
+    if c and now - c["ts"] < _kline_ttl and c["rows"]:
+        return c["rows"]
+
     best = []
     for cand in _kline_candidates(tx_sym):
-        rows = _kline_once(cand, period, count)
+        rows, pc = _kline_once(cand, period, count)
+        if pc is not None:
+            _preclose_cache[secid] = pc
+            _preclose_cache[tx_sym] = pc
         if len(rows) > len(best):
             best = rows
         if len(rows) >= 5:                    # 够画图了，记住这个代码形式
             _kline_sym_cache[tx_sym] = cand
+            _kline_cache[cache_key] = {"ts": now, "rows": rows}
             return rows
+    if len(best) >= 5:                         # 仅缓存「够画图」的结果，避免把残缺数据缓存住
+        _kline_cache[cache_key] = {"ts": now, "rows": best}
     return best
 
 
 # ================================================================
 #  分时（腾讯）
 # ================================================================
+
+def _em_minute(secid):
+    """东财分时（美股指数/个股 fallback）。
+    腾讯 minute/query 对美股指数只返回 1 点最新快照、无分时序列，
+    故美股改用东财 push2delay 分时接口。返回 [{time,price,avg}]。"""
+    url = ("https://push2delay.eastmoney.com/api/qt/stock/trends2/get?secid=%s"
+           "&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61&iscr=0&ndays=1" % secid)
+    try:
+        req = urllib.request.Request(url, headers={**HEADERS, "Referer": "https://quote.eastmoney.com/"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            d = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return []
+    data = d.get("data")
+    if not isinstance(data, dict):
+        return []
+    ts = data.get("trends") or []
+    out = []
+    for line in ts:
+        if not isinstance(line, str):
+            continue
+        parts = line.split(",")
+        if len(parts) < 8:
+            continue
+        t = parts[0]
+        hhmm = t.split(" ")[1] if " " in t else t
+        try:
+            price = float(parts[2])
+        except (ValueError, TypeError):
+            continue
+        avg = None
+        try:
+            a = float(parts[7])
+            if a > 0:
+                avg = round(a, 3)
+        except (ValueError, TypeError, ZeroDivisionError):
+            pass
+        out.append({"time": hhmm, "price": price, "avg": avg})
+    return out
+
 
 def fetch_trends(secid):
     r = em_to_tx(secid)
@@ -487,6 +570,17 @@ def fetch_trends(secid):
                 node_obj = v
                 break
     node_obj = node_obj or {}
+
+    # 提取昨收（用于分时图百分比轴）：腾讯 qt 实时块 [4]=昨收
+    try:
+        _qt = node_obj.get("qt") or {}
+        _qarr = _qt.get(tx_sym) if isinstance(_qt, dict) else None
+        if isinstance(_qarr, list) and len(_qarr) > 4:
+            _pc = float(_qarr[4])
+            _preclose_cache[secid] = _pc
+            _preclose_cache[tx_sym] = _pc
+    except (ValueError, TypeError, AttributeError):
+        pass
 
     inner = node_obj.get("data") or {}
     rows = inner.get("data") if isinstance(inner, dict) else inner
@@ -522,6 +616,11 @@ def fetch_trends(secid):
             "price": price,
             "avg": avg,
         })
+    # 腾讯分时对美股指数仅返回 1 点最新快照（无分时序列），改走东财分时
+    if len(out) < 3 and (secid.startswith("100.") or secid.startswith("105.")):
+        er = _em_minute(secid)
+        if er:
+            return er
     return out
 
 
@@ -531,7 +630,7 @@ def fetch_trends(secid):
 
 def _sina_boards_all():
     """拉取新浪全部行业板块原始数据（带 15 秒缓存，板块榜与涨跌家数共用一次请求）。
-    新浪 vals 字段：[0]代码 [1]名称 [2]成分股数 [3]均价 [4]平均涨跌幅%
+    新浪 vals 字段：[0]代码 [1]名称 [2]成分股数 [3]均价 [4]平均涨跌额(元) [5]平均涨跌幅%
                     [6]成交量 [7]成交额(元) [8]领涨股代码 [12]领涨股名
     """
     now = time.time()
@@ -557,7 +656,7 @@ def _sina_boards_all():
                 if len(vals) < 8:
                     continue
                 try:
-                    pct = round(float(vals[4]), 2)
+                    pct = round(float(vals[5]), 2)  # [5]=平均涨跌幅%; 注意[4]是涨跌额(元)而非涨跌幅
                 except (ValueError, IndexError):
                     pct = 0.0
                 try:
@@ -587,16 +686,164 @@ def _sina_boards_all():
     raise Exception(f"新浪板块数据获取失败: {last_err}")
 
 
-def fetch_boards(pz=15):
-    """板块涨幅榜——新浪财经行业板块（国内直连，无需代理）。
-    返回板块名 / 涨跌幅% / 成交额(元) / 领涨股。失败时降级为主要指数热度。
+# 东财板块列表接口：push2.eastmoney.com 近期不稳定（偶发空返回 → 触发降级成指数近似，
+# 面板显示上证指数/深证成指等"非具体板块"）。改用 push2delay.eastmoney.com（与分时接口同主机，
+# 实测稳定返回真实行业/概念板块）。保留 push2 作为兜底 host。
+_EM_BOARD_HOSTS = [
+    "https://push2delay.eastmoney.com/api/qt/clist/get",
+    "https://push2.eastmoney.com/api/qt/clist/get",
+]
+_EM_BOARD_URL = _EM_BOARD_HOSTS[0]
+_EM_BOARD_FIELDS = "f12,f14,f3,f62,f104,f105"
+_EM_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Referer": "https://quote.eastmoney.com/center/boardlist.html",
+    "Accept": "*/*",
+    "Accept-Language": "zh-CN,zh;q=0.9",
+    "Connection": "keep-alive",
+}
+
+
+def _em_boards_all():
+    """东方财富板块：行业板块(t:2) + 概念板块(t:3) 合并，返回具体行业/题材板块。
+    字段：f12代码 f14名称 f3涨跌幅% f62主力净流入(元) f104涨家数 f105跌家数。
+    合并时按名称归一去重（去掉末尾「概念」），行业干净名优先，避免「煤炭」与「煤炭概念」并存。
     """
+    now = time.time()
+    if _em_boards_cache["data"] and now - _em_boards_cache["ts"] < _boards_ttl:
+        return _em_boards_cache["data"]
+    cats = ["m:90+t:2", "m:90+t:3"]
+    last_err = None
+    for host in _EM_BOARD_HOSTS:
+        merged, seen_base = [], set()
+        try:
+            for fs in cats:
+                url = (host + "?" + "pn=1&pz=500&po=1&np=1&fltt=2&invt=2&fields="
+                       + _EM_BOARD_FIELDS + "&fs=" + fs + "&_=" + str(int(time.time() * 1000)))
+                req = urllib.request.Request(
+                    url, headers=_EM_HEADERS)
+                raw = urllib.request.urlopen(req, timeout=12).read().decode("utf-8", "ignore")
+                obj = json.loads(raw)
+                diff = (obj.get("data") or {}).get("diff") or []
+                for d in diff:
+                    name = (d.get("f14") or "").strip()
+                    if not name:
+                        continue
+                    base = re.sub(r"概念$", "", name)
+                    if base in seen_base:
+                        continue
+                    seen_base.add(name)
+                    try:
+                        pct = round(float(d.get("f3") or 0), 2)
+                    except (ValueError, TypeError):
+                        pct = 0.0
+                    try:
+                        inflow = float(d.get("f62") or 0)
+                    except (ValueError, TypeError):
+                        inflow = 0.0
+                    merged.append({
+                        "code": d.get("f12"), "name": name, "pct": pct,
+                        "inflow": inflow,
+                        "up": d.get("f104"), "down": d.get("f105"),
+                        "source": "em",
+                    })
+            if not merged:
+                raise ValueError("东财板块为空")
+            _em_boards_cache["data"] = merged
+            _em_boards_cache["ts"] = now
+            return merged
+        except Exception as e:
+            last_err = e
+            continue
+    if _em_boards_cache["data"]:
+        return _em_boards_cache["data"]
+    raise Exception(f"东财板块获取失败: {last_err}")
+
+
+def _em_board_leader(code):
+    """东财板块成分股领涨（涨幅最高的一只）。code=BKxxxx。"""
     try:
-        items = sorted(_sina_boards_all(), key=lambda x: x.get("pct") or 0, reverse=True)
-        return items[:pz]
+        url = (_EM_BOARD_URL + "?" + "pn=1&pz=5&po=1&np=1&fltt=2&invt=2&fields=f12,f14,f3"
+               + "&fs=b:" + str(code) + "&_=" + str(int(time.time() * 1000)))
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://quote.eastmoney.com/"})
+        raw = urllib.request.urlopen(req, timeout=12).read().decode("utf-8", "ignore")
+        obj = json.loads(raw)
+        diff = (obj.get("data") or {}).get("diff") or []
+        rows = []
+        for d in diff:
+            try:
+                rows.append({"code": (d.get("f12") or "").strip(),
+                             "name": (d.get("f14") or "").strip(),
+                             "pct": round(float(d.get("f3") or 0), 2)})
+            except (ValueError, TypeError):
+                pass
+        if rows:
+            rows.sort(key=lambda x: x["pct"], reverse=True)
+            return rows[0]
     except Exception:
         pass
-    # 全部失败，降级：用主要指数涨跌模拟板块热度
+    return None
+
+
+def _em_board_stocks(code, pz=30):
+    """东财板块成分股列表（前 pz 只，按涨幅降序）。code=BKxxxx。"""
+    try:
+        url = (_EM_BOARD_URL + "?" + "pn=1&pz=%d&po=1&np=1&fltt=2&invt=2&fields=f12,f14,f3,f2,f62"
+               % pz + "&fs=b:" + str(code) + "&_=" + str(int(time.time() * 1000)))
+        req = urllib.request.Request(url, headers=_EM_HEADERS)
+        raw = urllib.request.urlopen(req, timeout=12).read().decode("utf-8", "ignore")
+        obj = json.loads(raw)
+        diff = (obj.get("data") or {}).get("diff") or []
+        rows = []
+        for d in diff:
+            code_ = (d.get("f12") or "").strip()
+            name = (d.get("f14") or "").strip()
+            if not code_ or not name:
+                continue
+            try:
+                pct = round(float(d.get("f3") or 0), 2)
+            except (ValueError, TypeError):
+                pct = 0.0
+            try:
+                price = round(float(d.get("f2") or 0), 2)
+            except (ValueError, TypeError):
+                price = None
+            try:
+                inflow = float(d.get("f62") or 0)
+            except (ValueError, TypeError):
+                inflow = 0.0
+            secid = ("1." if re.match(r"^[69]", code_) else "0.") + code_
+            rows.append({"code": code_, "name": name, "pct": pct,
+                         "price": price, "inflow": inflow, "secid": secid})
+        rows.sort(key=lambda x: x["pct"], reverse=True)
+        return rows
+    except Exception:
+        return []
+
+
+def fetch_boards(pz=None):
+    """板块数据——东方财富行业+概念板块（具体题材：半导体/CPO/PCB/煤炭/电力/创新药…）。
+    主源东财；东财不可用时降级新浪行业板块；再不可用降级为指数近似（标注 degraded）。
+    pz=None 返回「全部板块」（降序），确保领跌也能覆盖到真正的下跌板块。
+    """
+    try:
+        items = sorted(_em_boards_all(), key=lambda x: x.get("pct") or 0, reverse=True)
+        for it in items:
+            it.setdefault("degraded", False)
+        return items if pz is None else items[:pz]
+    except Exception:
+        pass
+    # 东财失败，降级：新浪行业板块（标注 degraded，前端提示非东财口径）
+    try:
+        items = sorted(_sina_boards_all(), key=lambda x: x.get("pct") or 0, reverse=True)
+        for it in items:
+            it["degraded"] = True
+            it["source"] = "新浪行业板块(东财不可用)"
+        return items if pz is None else items[:pz]
+    except Exception:
+        pass
+    # 再降级：用主要指数涨跌模拟板块热度（标注 degraded=True，不伪装成真实板块）
     try:
         test_codes = ["sh000001","sz399001","sz399006","sh000688","sz399852","sz399905"]
         data = fetch_quotes_batch(test_codes)
@@ -604,9 +851,10 @@ def fetch_boards(pz=15):
         for sym, it in data.items():
             if it.get("pct") is not None and not it.get("error"):
                 items.append({"code": sym, "name": it.get("name", sym),
-                              "pct": it.get("pct", 0), "amount": it.get("amount")})
+                              "pct": it.get("pct", 0), "amount": it.get("amount"),
+                              "leader": None, "degraded": True, "source": "指数近似(东财/新浪不可用)"})
         items.sort(key=lambda x: x.get("pct") or 0, reverse=True)
-        return items[:pz]
+        return items if pz is None else items[:pz]
     except Exception:
         return []
 
@@ -830,7 +1078,7 @@ def get_anomaly():
                     groups[t].append(rec)
     boards = []
     try:
-        blist = fetch_boards(30)
+        blist = fetch_boards()
         with _ANOM_LOCK:
             for b in blist:
                 nm = b.get("name"); pct = b.get("pct")
@@ -860,6 +1108,185 @@ def get_anomaly():
         groups[k] = groups[k][:12]
     boards = boards[:12]
     return {"groups": groups, "boards": boards, "updated": now}
+
+
+# ================================================================
+#  大盘异动（分时图 + 板块异动事件流）
+# ================================================================
+
+_ANOM_EVENTS = collections.deque(maxlen=60)   # 滚动事件缓存：最近 60 条
+_ANOM_EVENT_LOCK = threading.Lock()
+_LAST_BOARD_SNAP = {}                        # 上次板块快照 {name: pct} 用于计算速度
+
+
+def _classify_anomaly_event(pct, delta=None):
+    """根据涨跌幅和速度返回事件类型与中文描述模板。"""
+    if pct is not None and pct >= 2.5:
+        return "拉升", f"{pct:.2f}%"
+    if pct is not None and pct <= -2.5:
+        return "下挫", f"{pct:.2f}%"
+    if pct is not None and pct >= 1.0:
+        return "快速拉升", f"{pct:.2f}%"
+    if pct is not None and pct <= -1.0:
+        return "快速下挫", f"{pct:.2f}%"
+    if delta is not None and delta >= 0.8:
+        return "急速拉升高", f"+{delta:.2f}%"
+    if delta is not None and delta <= -0.8:
+        return "急速下跌", f"{delta:.2f}%"
+    return "异动", ""
+
+
+def get_market_anomaly():
+    """大盘异动：返回上证分时数据 + 板块/个股异动事件流（带时间戳）。"""
+    global _LAST_BOARD_SNAP
+    now = time.time()
+    now_str = time.strftime("%H:%M", time.localtime(now))
+
+    # ---- 1) 分时数据（上证指数）----
+    # 注意：fetch_trends 内部走 em_to_tx，需传东方财富格式 secid（1.000001），
+    # 直接传 "sh000001" 会被 em_to_tx 判为不支持而返回空，导致异动面板分时图空白。
+    trends = []
+    try:
+        trends = fetch_trends("1.000001")
+    except Exception:
+        pass
+
+    # ---- 2) 当前领涨/领跌板块：直接作为分时图上的异动标注 ----
+    # 设计：不再等板块「突然」突破阈值才记录（那样盘中大部分时间 events 为空 → 图上看不到异动），
+    # 而是每轮把当前最值得关注的板块（涨跌幅大 或 较上次快照突变）算作"异动"，标注到分时图。
+    new_events = []
+    movers = []
+    try:
+        blist = fetch_boards()
+        current_snap = {}
+        for b in blist:
+            nm = b.get("name")
+            pct = b.get("pct")
+            if nm is not None and pct is not None:
+                current_snap[nm] = {"pct": pct, "amount": b.get("amount", 0),
+                                    "leader": b.get("leader", ""),
+                                    "code": b.get("code")}  # 板块代码(BKxxxx)，用于拉成分股
+
+        # 与上次快照对比，得到"突变"幅度，用于捕捉"突然"拉升/跳水
+        for nm, cur in current_snap.items():
+            old = _LAST_BOARD_SNAP.get(nm)
+            cur["delta"] = (cur["pct"] - old["pct"]) if old is not None else 0.0
+
+        with _ANOM_EVENT_LOCK:
+            # 选取"值得标注"的板块：涨跌幅够大 或 变化够突然；综合排序取前 8
+            cands = []
+            for nm, c in current_snap.items():
+                pct = c["pct"]; delta = c.get("delta", 0.0)
+                if abs(pct) < 0.4 and abs(delta) < 0.25:
+                    continue
+                score = abs(pct) + abs(delta) * 2.0
+                cands.append((score, nm, c))
+            cands.sort(key=lambda x: x[0], reverse=True)
+            for _, nm, c in cands[:8]:
+                pct = c["pct"]; delta = c.get("delta", 0.0)
+                etype, edesc = _classify_anomaly_event(pct, delta)
+                # 按排名将标注均匀分散到分时时间轴上（避免全部挤在当前时刻→全堆图右侧）
+                # 交易时段 09:30~15:00，按排名插值分配时间
+                rank = len(movers)
+                total = min(8, max(len(cands), 1))   # 预估总数，用于均匀分布
+                # 解析当前时间（格式 HH:MM）
+                parts = now_str.split(":")
+                cur_h = int(parts[0]) if parts else 14
+                cur_m = int(parts[1]) if len(parts) > 1 else 0
+                cur_total_min = cur_h * 60 + cur_m
+                start_min = 9 * 60 + 30                 # 09:30
+                end_min = min(15 * 60, max(start_min + 10, cur_total_min))  # 不超过 15:00
+                span = max(10, end_min - start_min)
+                alloc_min = start_min + int(span * rank / max(total - 1, 1))
+                alloc_h = alloc_min // 60
+                alloc_m = alloc_min % 60
+                mv_time = f"{alloc_h:02d}:{alloc_m:02d}"
+                mv = {
+                    "time": mv_time,
+                    "title": f"{nm}板块{etype}",
+                    "type": etype,
+                    "dir": "up" if (pct or 0) > 0 else "down",
+                    "sector": nm,
+                    "pct": round(pct, 2) if pct is not None else None,
+                    "delta": round(delta, 2) if delta is not None else None,
+                    "desc": edesc,
+                    "stocks": [],
+                }
+                # 拉取该板块成分股（前4只：2领涨+2领跌），用于异动列表展示
+                bkcode = c.get("code")
+                if bkcode:
+                    try:
+                        stk_list = _em_board_stocks(bkcode, pz=6)
+                        if stk_list:
+                            # 取涨幅最高的2只 + 最低的2只（或按实际数量灵活取）
+                            up_stks = [s for s in stk_list if s.get("pct", 0) > 0][:2]
+                            dn_stks = [s for s in sorted(stk_list, key=lambda x: x.get("pct", 0)) if s.get("pct", 0) <= 0][:2]
+                            mv["stocks"] = (up_stks + dn_stks)[:4]
+                    except Exception:
+                        pass
+                movers.append(mv)
+                new_events.append(dict(mv, time_ts=now))   # 同时进入滚动时间线
+
+            _LAST_BOARD_SNAP = current_snap
+    except Exception:
+        pass
+
+    # ---- 3) 个股级别异动（涨停/急拉/急跌等）也注入事件流 ----
+    try:
+        anom = get_anomaly()
+        stock_groups = anom.get("groups", {})
+        for gtype in ("急拉", "急跌", "涨停", "跌停"):
+            items = stock_groups.get(gtype, [])[:3]  # 每类最多取3条避免刷屏
+            for it in items:
+                name = it.get("name", "")
+                pct = it.get("pct")
+                event = {
+                    "time": now_str,
+                    "time_ts": now,
+                    "title": f"{name}{gtype}" + (f" {fmt_pct(pct)}" if pct is not None else ""),
+                    "type": gtype,
+                    "dir": "up" if gtype in ("急拉", "涨停", "大涨") else "down",
+                    "sector": None,
+                    "pct": round(pct, 2) if pct is not None else None,
+                    "delta": None,
+                    "desc": "",
+                    "code": it.get("code"),
+                    "secid": it.get("secid"),
+                    "stocks": [],
+                }
+                new_events.append(event)
+    except Exception:
+        pass
+
+    # ---- 4) 去重后写入滚动缓存 ----
+    with _ANOM_EVENT_LOCK:
+        for ev in new_events:
+            # 简单去重：同一板块/个股在 120 秒内不重复触发同类型
+            dup = False
+            for old_ev in _ANOM_EVENTS:
+                if (old_ev.get("sector") == ev.get("sector") or
+                        old_ev.get("code") == ev.get("code")):
+                    if old_ev.get("type") == ev.get("type"):
+                        if now - old_ev.get("time_ts", 0) < 120:
+                            dup = True
+                            break
+            if not dup:
+                _ANOM_EVENTS.append(ev)
+
+    events = sorted(_ANOM_EVENTS, key=lambda e: e.get("time_ts", 0), reverse=True)[:30]
+
+    return {
+        "trends": trends,
+        "events": events,
+        "movers": movers,
+        "updated": now,
+    }
+
+
+def fmt_pct(v):
+    """格式化百分比（兼容 None）。"""
+    if v is None: return "--"
+    return f"{v:+.2f}%"
 
 
 def fetch_breadth():
@@ -1121,10 +1548,27 @@ _SECTOR_ALIAS = {
 }
 
 def get_sector_info(name):
-    """板块详情：优先用新浪行业板块实时数据（成分股数/平均涨跌幅/领涨股，本地可用）。
-    概念板块无新浪数据则返回 found=False，前端引导用户联网查看。
-    新浪板块名带「行业/板块」后缀（如 银行行业），与搜索短名（银行）做归一化匹配；
-    一级行业较粗（银行/券商归在 金融行业），再加别名映射覆盖常见细分词。"""
+    """板块详情：优先东财行业/概念板块（题材覆盖全，含半导体/CPO/PCB/创新药等）；
+    找不到再回落新浪行业板块。东财返回涨跌幅/涨跌家数/主力净流入/领涨成分股。"""
+    # ---- 东财优先：按名称在板块列表匹配，并拉领涨成分股 ----
+    try:
+        for b in _em_boards_all():
+            if (b.get("name") or "").strip() == (name or "").strip():
+                code = b.get("code")
+                leader = _em_board_leader(code) if code else None
+                stocks = _em_board_stocks(code, 30) if code else []
+                return {
+                    "name": name, "found": True, "source": "em",
+                    "pct": b.get("pct"), "up": b.get("up"), "down": b.get("down"),
+                    "inflow": b.get("inflow"),
+                    "leaderCode": leader.get("code") if leader else "",
+                    "leaderName": leader.get("name") if leader else "",
+                    "leaderPct": leader.get("pct") if leader else None,
+                    "stocks": stocks,
+                }
+    except Exception:
+        pass
+    # ---- 回落新浪行业板块 ----
     try:
         boards = _sina_boards_all()
     except Exception:
@@ -1947,6 +2391,203 @@ def build_state():
     }
 
 
+def _safe(v, d=None):
+    return v if v not in (None, "", 0) else d
+
+
+def get_daily_report():
+    """每日市场调研报告：聚合盘口/涨跌家数/涨跌榜/板块/异动/龙虎榜/资讯，
+    产出结构化 JSON（前端排版为自包含报告）。各子模块自带缓存，整体仅比一次 /api/state 略慢。"""
+    now = datetime.datetime.now()
+    date_str = now.strftime("%Y年%m月%d日")
+    weekday = "周" + "一二三四五六日"[now.weekday()]
+    report = {
+        "date": date_str, "weekday": weekday,
+        "ts": int(time.time() * 1000),
+        "indices": [], "global": [], "breadth": None,
+        "gainers": [], "losers": [], "boards": {"up": [], "down": []},
+        "anomaly": [], "billboard": [], "news": [],
+        "summary": "", "sentiment": "中性",
+    }
+    # ---- 1) 指数 + 全球市场 ----
+    try:
+        state = build_state()
+        report["indices"] = [
+            {"name": it.get("name"), "price": _safe(it.get("price")),
+             "pct": _safe(it.get("pct")), "secid": it.get("secid")}
+            for it in state.get("market", {}).get("items", []) if isinstance(it, dict)
+        ]
+        for g in state.get("global", []):
+            items = [
+                {"name": it.get("name"), "price": _safe(it.get("price")),
+                 "pct": _safe(it.get("pct")), "secid": it.get("secid")}
+                for it in g.get("items", []) if isinstance(it, dict)
+            ]
+            if items:
+                report["global"].append({"label": g.get("label"), "items": items})
+    except Exception:
+        pass
+
+    # ---- 2) 涨跌家数 ----
+    try:
+        b = get_breadth()
+        up, down, flat, total = b.get("up", 0), b.get("down", 0), b.get("flat", 0), b.get("total", 0)
+        report["breadth"] = {
+            "up": up, "down": down, "flat": flat, "total": total,
+            "ratio": round(up / down, 2) if down else (None if not up else 99),
+            "upPct": round(up / total * 100, 1) if total else None,
+            "totalAmount": b.get("totalAmount"),
+        }
+    except Exception:
+        pass
+
+    # ---- 3) 个股涨跌榜 ----
+    try:
+        rk = get_rank()
+        def _trim(lst):
+            out = []
+            for it in lst[:10]:
+                out.append({"name": it.get("name"), "code": it.get("code"),
+                            "price": _safe(it.get("price")), "pct": _safe(it.get("pct")),
+                            "secid": it.get("secid")})
+            return out
+        report["gainers"] = _trim(rk.get("gainers", []))
+        report["losers"] = _trim(rk.get("losers", []))
+    except Exception:
+        pass
+
+    # ---- 4) 板块（领涨 / 领跌）---- 用全量板块，避免漏掉真正的下跌板块
+    try:
+        bs = [x for x in fetch_boards() if x.get("pct") is not None]
+        if bs and bs[0].get("degraded"):
+            # 新浪板块源降级（指数模拟填充），不展示为真实板块榜
+            report["boards"]["degraded"] = True
+        else:
+            bs.sort(key=lambda x: x.get("pct", 0), reverse=True)
+            # 领涨：仅取真正上涨的板块（按涨幅降序）
+            ups = [x for x in bs if x.get("pct", 0) > 0][:8]
+            report["boards"]["up"] = [
+                {"name": x.get("name"), "pct": round(x.get("pct", 0), 2),
+                 "amount": x.get("amount"), "leader": x.get("leader")}
+                for x in ups
+            ]
+            # 领跌：取真正下跌的板块，跌幅最大的排最前
+            downs = [x for x in bs if x.get("pct", 0) < 0]
+            downs.sort(key=lambda x: x.get("pct", 0))
+            report["boards"]["down"] = [
+                {"name": x.get("name"), "pct": round(x.get("pct", 0), 2),
+                 "amount": x.get("amount"), "leader": x.get("leader")}
+                for x in downs[:5]
+            ]
+    except Exception:
+        pass
+
+    # ---- 5) 异动（涨停/急拉/大跌/急跌 取前几条）----
+    try:
+        an = get_anomaly()
+        picks = []
+        for gt in ("涨停", "急拉", "大涨", "跌停", "急跌", "大跌"):
+            for it in an.get("groups", {}).get(gt, [])[:3]:
+                picks.append({"type": gt, "name": it.get("name"), "code": it.get("code"),
+                              "pct": _safe(it.get("pct")), "secid": it.get("secid")})
+        report["anomaly"] = picks[:14]
+    except Exception:
+        pass
+
+    # ---- 6) 龙虎榜 ----
+    try:
+        bb = get_billboard()
+        items = bb.get("items", []) or []
+        top = sorted([x for x in items if x.get("net") is not None],
+                     key=lambda x: x.get("net", 0), reverse=True)[:10]
+        report["billboard"] = [
+            {"name": x.get("name"), "code": x.get("code"), "pct": _safe(x.get("pct")),
+             "net": x.get("net"), "orgNet": x.get("org_net"),
+             "reason": x.get("reason"), "secid": x.get("secid")}
+            for x in top
+        ]
+        report["billboardDate"] = bb.get("date")
+        report["billboardType"] = bb.get("type")
+    except Exception:
+        pass
+
+    # ---- 7) 资讯要闻 ----
+    try:
+        nw = get_news("sina") or {}
+        items = nw.get("items") or []
+        report["news"] = [
+            {"title": it.get("title"), "url": it.get("url"),
+             "source": it.get("source"), "time": it.get("time")}
+            for it in items[:10] if it.get("title")
+        ]
+    except Exception:
+        pass
+
+    # ---- 8) 自动撰写盘面综述 ----
+    report["summary"], report["sentiment"] = _compose_summary(report)
+    return report
+
+
+def _compose_summary(r):
+    """依据聚合数据生成一段盘面综述文本 + 情绪标签。"""
+    b = r.get("breadth") or {}
+    up, down, total = b.get("up", 0), b.get("down", 0), b.get("total", 0)
+    up_pct = b.get("upPct")
+    # 主板主要指数涨跌
+    main_up = [x for x in r.get("indices", []) if (x.get("pct") or 0) > 0]
+    main_down = [x for x in r.get("indices", []) if (x.get("pct") or 0) < 0]
+    idx_lines = "、".join("%s%s%%" % (x["name"], ("+" if x["pct"] > 0 else "") + str(x["pct"]))
+                          for x in r.get("indices", [])[:6] if x.get("pct") is not None)
+    bu = r.get("boards", {}).get("up", [])
+    bd = r.get("boards", {}).get("down", [])
+    top_board = bu[0] if bu else None
+    top_down_board = bd[0] if bd else None
+    g = r.get("gainers", [])[:3]
+    l = r.get("losers", [])[:3]
+
+    # 情绪判定
+    if total and up_pct is not None:
+        if up_pct >= 70:
+            sentiment = "强势普涨"
+        elif up_pct >= 55:
+            sentiment = "偏多"
+        elif up_pct >= 45:
+            sentiment = "多空均衡"
+        elif up_pct >= 30:
+            sentiment = "偏弱"
+        else:
+            sentiment = "普跌"
+    else:
+        sentiment = "中性"
+
+    parts = []
+    if idx_lines:
+        parts.append("今日主要指数%s。" % idx_lines)
+    if total and up_pct is not None:
+        parts.append("两市涨跌家数 %d 涨 / %d 跌 / %d 平，上涨占比 %.1f%%。" % (up, down, b.get("flat", 0), up_pct))
+        amt = b.get("totalAmount")
+        if amt:
+            parts.append("全市场成交额约 %.2f 亿元。" % (amt / 1e8))
+    if top_board:
+        parts.append("领涨板块为%s(%s%%)。" % (top_board["name"], ("+" if top_board["pct"] > 0 else "") + str(top_board["pct"])))
+    if top_down_board:
+        parts.append("领跌板块为%s(%s%%)。" % (top_down_board["name"], str(top_down_board["pct"])))
+    if g:
+        parts.append("个股方面，涨幅居前：%s。" % "、".join("%s%s%%" % (x["name"], ("+" if x["pct"] > 0 else "") + str(x["pct"])) for x in g))
+    if l:
+        parts.append("跌幅居前：%s。" % "、".join("%s%s%%" % (x["name"], str(x["pct"])) for x in l))
+    an = r.get("anomaly", [])
+    if an:
+        hot = "、".join("%s%s" % (x["name"], x["type"]) for x in an[:4])
+        parts.append("盘面异动：%s。" % hot)
+    bb = r.get("billboard", [])
+    if bb:
+        parts.append("龙虎榜净买入居首：%s（净买%.2f万元）。" % (bb[0]["name"], (bb[0]["net"] or 0) / 1e4))
+    if not parts:
+        parts.append("暂无足够行情数据生成综述，请稍后重试。")
+    return "".join(parts), sentiment
+
+
 # ================================================================
 #  HTTP 服务
 # ================================================================
@@ -1995,9 +2636,29 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._json({"error": str(e)})
             return
+        if path == "/api/daily_report":
+            try:
+                # 首次生成需扫描全市场行情；用线程+超时避免请求挂死。
+                # 注意：不能用 `with ThreadPoolExecutor` 上下文管理器——退出 with 块时
+                # shutdown(wait=True) 会阻塞等后台线程跑完，使 30s 超时保护完全失效。
+                _ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                _fut = _ex.submit(get_daily_report)
+                try:
+                    d = _fut.result(timeout=30)
+                except concurrent.futures.TimeoutError:
+                    _ex.shutdown(wait=False)   # 立即返回，不等待后台线程
+                    self._json({"error": "报告生成超时（首次生成需扫描全市场行情，约 10–20 秒），请稍候再点一次"})
+                    return
+                _ex.shutdown(wait=False)
+                self._json(d)
+            except Exception as e:
+                self._json({"error": str(e)})
+            return
         if path == "/api/boards":
             try:
-                self._json({"items": fetch_boards(15)})
+                items = fetch_boards()
+                # 返回全部行业板块；degraded=True 表示新浪源不可用、已降级为指数模拟
+                self._json({"items": items, "degraded": any(x.get("degraded") for x in items)})
             except Exception as e:
                 self._json({"error": str(e)})
             return
@@ -2019,6 +2680,12 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._json({"error": str(e)})
             return
+        if path == "/api/market-anomaly":
+            try:
+                self._json(get_market_anomaly())
+            except Exception as e:
+                self._json({"error": str(e)})
+            return
         if path == "/api/rank":
             try:
                 self._json(get_rank())
@@ -2030,7 +2697,7 @@ class Handler(BaseHTTPRequestHandler):
             secid = (qs.get("secid") or [""])[0]
             klt = (qs.get("klt") or ["101"])[0]
             try:
-                self._json({"secid": secid, "klt": klt, "data": fetch_kline(secid, klt)})
+                self._json({"secid": secid, "klt": klt, "data": fetch_kline(secid, klt), "preClose": _preclose_cache.get(secid)})
             except Exception as e:
                 self._json({"error": str(e)})
             return
@@ -2038,7 +2705,7 @@ class Handler(BaseHTTPRequestHandler):
             qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             secid = (qs.get("secid") or [""])[0]
             try:
-                self._json({"secid": secid, "data": fetch_trends(secid)})
+                self._json({"secid": secid, "data": fetch_trends(secid), "preClose": _preclose_cache.get(secid)})
             except Exception as e:
                 self._json({"error": str(e)})
             return
@@ -2214,6 +2881,76 @@ def main():
                         time.sleep(0.4)
         return pref
 
+    # ---- 单实例锁：跨平台可靠互斥，防止多实例抢 WebView2 窗口类闪退 ----
+    # Windows: 用内核命名互斥量(CreateMutex)。
+    #   关键改进 v2 —— 彻底不用 GetLastError（Python 内部 API 会在两次调用间将其重置导致竞态），
+    #   改用「创建 + WaitForSingleObject(0ms)」双步骤判断：
+    #     a) WAIT_OBJECT_0   → 我们是唯一创建者（或前进程已崩溃 abandoned），安全持有继续运行
+    #     b) WAIT_TIMEOUT   → 别的实例正持有锁 → 二次验证：找活着的 Python 进程，找不到=僵尸锁→强夺
+    #     c) WAIT_ABANDONED → 前进程崩溃遗留，自动回收继续运行
+    # Linux/Mac(如 Render): 用脚本目录下的固定锁文件 + fcntl 排他锁。
+    try:
+        if os.name == "nt":
+            import ctypes, subprocess
+            _mux_name = "Global\\StockBoard_Singleton_9f3a"
+            _k32 = ctypes.windll.kernel32
+            _h_mux = _k32.CreateMutexW(None, False, _mux_name)
+            _WAIT_TIMEOUT = 0x00000102
+            _WAIT_ABANDONED = 0x00000080
+            _rc = _k32.WaitForSingleObject(_h_mux, 0)
+            if _rc == _WAIT_TIMEOUT:
+                # 检测到锁被占用：找出其它正在运行的 stock-monitor 实例（排除自己）
+                _others = []
+                try:
+                    _r = subprocess.run(
+                        ["wmic", "process", "where", "name='python.exe'", "get", "ProcessId,CommandLine", "/FORMAT:CSV"],
+                        capture_output=True, timeout=5, creationflags=subprocess.CREATE_NO_WINDOW)
+                    _my_pid = os.getpid()
+                    for _wl in _r.stdout.decode("gbk", errors="replace").splitlines():
+                        if ("app.py" in _wl or "stock-monitor" in _wl) and str(_my_pid) not in _wl:
+                            # CSV 列顺序: Node,ProcessId,CommandLine（CommandLine 可能含逗号，取第 2 列即 PID）
+                            _pid = _wl.split(",")[1].strip() if "," in _wl else ""
+                            if _pid.isdigit():
+                                _others.append(int(_pid))
+                except Exception:
+                    _others = []
+                if _others:
+                    # 已有实例在跑：非阻塞——本进程改用独立锁名并照常打开自己的窗口。
+                    # 关键修复：绝不强杀旧窗口！强杀活动的 WebView2 进程会把运行时搞坏，
+                    # 导致后续新窗口也开不出来（表现为「打不开」）。多开时各实例端口由
+                    # pick_port 自动避让，互不干扰，用户关掉多余窗口即可。
+                    print("[看板] 检测到已有实例在运行，本次将另外打开一个独立窗口（旧的那个可直接关闭）。")
+                    _k32.CloseHandle(_h_mux)
+                    _mux_name = "Global\\StockBoard_Singleton_9f3a_" + str(os.getpid())
+                    _h_mux = _k32.CreateMutexW(None, False, _mux_name)
+                    _rc = _k32.WaitForSingleObject(_h_mux, 0)
+                else:
+                    # 无活跃进程但 mutex 仍被持有 → 僵尸锁，强制夺取
+                    print("[看板] 检测到僵尸锁（无活跃进程但互斥量未释放），强制清理并继续启动。")
+                    _k32.CloseHandle(_h_mux)
+                    _mux_name = "Global\\StockBoard_Singleton_9f3a_v2"
+                    _h_mux = _k32.CreateMutexW(None, False, _mux_name)
+                    _rc = _k32.WaitForSingleObject(_h_mux, 0)
+            if _rc == _WAIT_ABANDONED:
+                # 前进程崩溃遗留的 abandoned mutex —— 安全回收
+                print("[看板] 检测到残留锁（旧进程已异常退出），自动清理并继续启动。")
+                _k32.ReleaseMutex(_h_mux)
+            # _rc == WAIT_OBJECT_0(0)：正常拿到锁，持有句柄继续运行
+            # 进程退出/崩溃时操作系统自动 CloseHandle 并释放互斥量
+        else:
+            _lock_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".stock-monitor.lock")
+            _lock_fh = open(_lock_path, "w")
+            try:
+                import fcntl
+                fcntl.flock(_lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                _lock_fh.close()
+                print("[看板] 已有实例在运行。请直接使用已打开的窗口。")
+                sys.exit(1)
+    except Exception:
+        # 锁机制异常时不阻断启动（宁可多开也不至于起不来）
+        pass
+
     port = pick_port(int(os.environ.get("PORT", "8787")))
     # 本地默认只监听回环；部署到云平台（Render 等，HOST 或 RENDER 环境变量）时监听 0.0.0.0 才能接收外部请求
     host = os.environ.get("HOST") or ("0.0.0.0" if os.environ.get("RENDER") else "127.0.0.1")
@@ -2234,6 +2971,8 @@ def main():
         has_wv = False
 
     force_browser = os.environ.get("NO_WINDOW") == "1"
+    # 禁用 WebView2 GPU 硬件加速：规避远程桌面/集显/虚拟机下的渲染进程崩溃闪退
+    os.environ.setdefault("WEBVIEW2_ADDITIONAL_BROWSER_ARGS", "--disable-gpu")
     print(f"[看板] 行情看板已启动（v{VERSION}，腾讯/新浪数据源）：{url}")
     if has_wv and not force_browser:
         try:
@@ -2242,7 +2981,7 @@ def main():
                 app_title, url,
                 width=1280, height=820, resizable=True, min_size=(720, 520),
             )
-            webview.start()
+            webview.start(gui="edgechromium")
         except Exception as e:
             print(f"[看板] 原生窗口打开失败（{e}），改用浏览器打开。")
             try:

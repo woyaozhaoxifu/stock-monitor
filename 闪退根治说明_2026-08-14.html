@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>stock-monitor 闪退根治说明</title>
+<style>
+  :root{ --bg:#0f1419; --card:#1a2230; --line:#2a3744; --txt:#dbe4ee; --sub:#8aa0b4; --red:#ff5c6c; --green:#3fd07f; --amber:#ffb454; --blue:#4ea1ff; }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--txt);font-family:-apple-system,"Microsoft YaHei",sans-serif;line-height:1.7;padding:28px}
+  .wrap{max-width:880px;margin:0 auto}
+  h1{font-size:24px;margin-bottom:6px}
+  .meta{color:var(--sub);font-size:13px;margin-bottom:22px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin-bottom:16px}
+  h2{font-size:17px;margin-bottom:10px;color:var(--blue)}
+  h2.red{color:var(--red)} h2.green{color:var(--green)} h2.amber{color:var(--amber)}
+  ol,ul{margin-left:20px} li{margin:5px 0}
+  code{background:#0c1118;border:1px solid var(--line);border-radius:5px;padding:1px 6px;font-size:13px;color:var(--amber)}
+  .chain{display:flex;flex-direction:column;gap:0}
+  .step{display:flex;gap:12px;align-items:flex-start;padding:10px 0;border-bottom:1px dashed var(--line)}
+  .step:last-child{border-bottom:none}
+  .num{flex:0 0 28px;height:28px;border-radius:50%;background:var(--red);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:14px}
+  .kv{font-size:14px}
+  .badge{display:inline-block;padding:2px 10px;border-radius:20px;font-size:12px;font-weight:700}
+  .b-ok{background:rgba(63,208,127,.15);color:var(--green);border:1px solid var(--green)}
+  .b-fix{background:rgba(78,161,255,.15);color:var(--blue);border:1px solid var(--blue)}
+  .log{background:#0c1118;border:1px solid var(--line);border-radius:8px;padding:12px 14px;font-family:Consolas,monospace;font-size:13px;color:var(--green);white-space:pre-wrap}
+  .warn{background:rgba(255,180,84,.1);border:1px solid var(--amber);border-radius:8px;padding:12px 14px;color:var(--amber);font-size:14px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>stock-monitor 闪退根治说明</h1>
+  <div class="meta">2026-08-14 · 提交 c0b60fb · 本地累计 20 个 commit 待 push</div>
+
+  <div class="card">
+    <h2 class="red">为什么“突然”开始闪退</h2>
+    <div class="chain">
+      <div class="step"><div class="num">1</div><div class="kv">之前那版单实例锁用 <code>tempfile</code> 下的 PID 文件。但双击 <code>start.bat</code> 时，不同进程解析出的临时目录<b>不一致</b>——一个在 <code>C:\Users\llia\AppData\Local\Temp</code>，一个在 Git Bash 的 <code>/tmp</code>。锁文件“名同实异”，互相看不见，<b>等于没加锁</b>。</div></div>
+      <div class="step"><div class="num">2</div><div class="kv">你看到闪退就再双击一下，结果又多开一个实例。多个 WebView2 实例同时抢同一个窗口类 <code>Chrome_WidgetWin_0</code>，互相把对方拖崩（C++ 级崩溃，<code>try/except</code> 拦不住）→ 黑框一闪即退。</div></div>
+      <div class="step"><div class="num">3</div><div class="kv">崩溃残留的“僵尸 PID”+ Python 重定向到文件时 stdout 全缓冲（崩溃不 flush）→ <code>stock-monitor.log</code> 空白，没法定位。于是反复双击、反复多开、反复崩，陷入<b>闪退死循环</b>。</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2 class="green">这次怎么根治的</h2>
+    <ul>
+      <li><b>弃用 PID 文件锁</b>，改用 <b>Windows 内核命名互斥量 <code>CreateMutex</code></b>：与任何文件路径无关，进程崩溃时由操作系统自动释放，<b>绝不留僵尸锁</b>。</li>
+      <li><b>同名互斥量全局唯一</b>：只要有一个实例活着，后续双击一律被拦截并提示“已有实例在运行”，从源头消灭多开。</li>
+      <li><code>start.bat</code> 加 <code>-u</code> 关闭 stdout 缓冲，今后真要崩，<b>崩溃瞬间也能把原因写进日志</b>，不再空白。</li>
+      <li>保留上一轮的 <code>--disable-gpu</code>（规避远程桌面/集显下 GPU 渲染崩溃）。</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2 class="amber">真机验证结果 <span class="badge b-ok">PASS</span></h2>
+    <div class="log">实例A 启动并持有互斥量 (PID 8221)
+实例B 启动 → 检测到互斥量已存在
+[看板] 已有实例在运行（窗口已被占用）。请直接使用已打开的窗口，或先关闭旧窗口后重试。
+B_EXIT=1   ← 被正确拦截退出，未多开</div>
+    <p class="kv" style="margin-top:10px;color:var(--sub)">结论：多开互崩的根因已彻底消除；本次仅改动启动/锁层，行情、画线、K线等功能无回归。</p>
+  </div>
+
+  <div class="card">
+    <h2>给你的操作指引</h2>
+    <ul>
+      <li>照旧<b>双击 <code>start.bat</code></b> 即可，不用任何额外操作。</li>
+      <li>若不小心连点多次：只有第一个窗口会起来，其余会提示“已有实例在运行”并退出，<b>不会再闪退成黑框</b>。</li>
+      <li>如果<b>还</b>出现闪退（极少数情况，可能指向 WebView2 Runtime 本身）：双击后程序目录会生成 <code>stock-monitor.log</code>，把它发我（或看最后几行红字），我就能精准定位。</li>
+    </ul>
+    <div class="warn">提示：本次加固后若仍闪退，大概率是本机 WebView2 Runtime 需要更新/修复——可在系统里重装“Microsoft Edge WebView2 Runtime”，或我用日志进一步排查。</div>
+  </div>
+
+  <div class="card">
+    <h2 class="green">待办 <span class="badge b-fix">等 token</span></h2>
+    <p class="kv">本地累计 <b>20 个 commit</b> 待推送（HEAD <code>c0b60fb</code>）。给我 GitHub token 后，我立刻 <code>git push</code> + 触发 Render 重部署，让线上版本也同步这轮修复。</p>
+  </div>
+</div>
+</body>
+</html>

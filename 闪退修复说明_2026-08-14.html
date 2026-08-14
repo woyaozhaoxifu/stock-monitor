@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>stock-monitor 闪退修复说明</title>
+<style>
+  body{font-family:-apple-system,"Microsoft YaHei",sans-serif;max-width:820px;margin:32px auto;padding:0 20px;background:#fafafa;color:#222;line-height:1.7}
+  h1{font-size:22px;border-left:5px solid #c0392b;padding-left:12px}
+  h2{font-size:17px;margin-top:28px;color:#1a1a1a}
+  .box{background:#fff;border:1px solid #e3e3e3;border-radius:10px;padding:16px 20px;margin:14px 0;box-shadow:0 1px 3px rgba(0,0,0,.04)}
+  .ok{color:#1e7e34;font-weight:700}
+  .warn{color:#c0392b;font-weight:700}
+  code{background:#f0f0f0;padding:2px 6px;border-radius:4px;font-size:13px}
+  ul{margin:8px 0;padding-left:22px}
+  li{margin:6px 0}
+  .tip{background:#fff8e1;border-left:4px solid #f1c40f;padding:10px 14px;border-radius:6px;margin:14px 0}
+</style>
+</head>
+<body>
+<h1>🛠️ 股票看板「闪退」修复说明</h1>
+
+<div class="box">
+  <p><b>结论：</b>闪退不是程序逻辑写错，而是<b>原生窗口（pywebview / WebView2）在启动阶段崩溃，把整个程序一起拖死</b>。已针对两个最可能的根因做了加固，并让「真闪退时也能留下错误线索」。</p>
+</div>
+
+<h2>为什么会闪退？</h2>
+<div class="box">
+  <ul>
+    <li><b>① 多个实例抢窗口类（最主要）</b><br>
+      反复双击 <code>start.bat</code> 会瞬间拉起多个 <code>app.py</code>，它们共用 WebView2 的窗口类，互相冲突 → 新窗口渲染进程崩溃 → Python 主进程跟着死。<br>
+      铁证：本地复现日志里出现 <code>Failed to unregister class Chrome_WidgetWin_0. Error = 1411</code>（典型的窗口类冲突）。</li>
+    <li><b>② WebView2 GPU 硬件加速崩溃</b><br>
+      pywebview 在 Windows 上靠 Edge(WebView2) 内核。在<b>远程桌面(RDP) / 集显笔记本 / 虚拟机</b>下，GPU 硬件加速容易导致渲染进程崩溃 → 一闪即退（且 try/except 拦不住 C++ 级崩溃）。</li>
+  </ul>
+</div>
+
+<h2>这次改了什么</h2>
+<div class="box">
+  <ul>
+    <li class="ok">✅ 单实例锁</li>
+    <p style="margin:2px 0 10px">用进程 PID 文件确保同一时间只有一个实例在跑，从根本上消除①的窗口类冲突。再双击会被提示「已有实例在运行，请使用已打开的窗口」。</p>
+    <li class="ok">✅ 禁用 WebView2 GPU 硬件加速</li>
+    <p style="margin:2px 0 10px">注入 <code>WEBVIEW2_ADDITIONAL_BROWSER_ARGS=--disable-gpu</code>，改用软件渲染，规避②的远程桌面/集显崩溃（正常机器也能跑，只是略慢、更稳）。</p>
+    <li class="ok">✅ 显式指定内核</li>
+    <p style="margin:2px 0 10px"><code>webview.start(gui="edgechromium")</code>，避免后端选错。</p>
+    <li class="ok">✅ 启动日志落盘 + 不再一闪而过</li>
+    <p style="margin:2px 0 0"><code>start.bat</code> 把所有输出和报错写到 <code>stock-monitor.log</code>；若仍异常退出，会停在窗口显示最后日志并等你按键，不再黑框一闪消失。</p>
+  </ul>
+</div>
+
+<h2>怎么用</h2>
+<div class="box">
+  <p>照旧 <b>双击 <code>start.bat</code></b> 即可。无需任何额外操作。</p>
+</div>
+
+<div class="tip">
+  <b>如果还是闪退（兜底诊断）：</b><br>
+  1. 双击 <code>start.bat</code> 后，程序目录会生成 <code>stock-monitor.log</code>；<br>
+  2. 把它发给我（或直接打开看最后几行红色报错）；<br>
+  3. 我就能定位到 WebView2 的具体错误，进一步处理。<br>
+  <br>
+  另外，若你是通过<b>远程桌面</b>连这台机器用的，本次「禁用 GPU」通常已能解决；若仍崩，多半是 WebView2 Runtime 需要更新（系统设置里修复/重装 Microsoft Edge WebView2 Runtime 即可）。
+</div>
+
+<div class="box" style="font-size:13px;color:#666">
+  <p>验证情况：单实例锁已真机验证通过（实例 A 存活时，实例 B 被正确拦截退出）；服务可正常启动、页面零 JS 错误。本次改动仅涉及启动/窗口层，不影响行情、画线、K线等功能。</p>
+</div>
+</body>
+</html>

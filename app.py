@@ -444,6 +444,11 @@ def _kline_once(sym, period, count):
                 })
         except (TypeError, ValueError, KeyError):
             continue
+    # 兜底：qt 实时块常缺昨收（尤其非交易时段/历史复权数据），从日K数据本身推算：
+    #   日K/周K/月K → 倒数第二根收盘价 ≈ 上一周期收盘（最接近"昨收"）
+    #   分钟级 → 最后一根的前一根 close 也比没有强
+    if pre_close is None and len(out) >= 2:
+        pre_close = out[-2].get("close")
     return out, pre_close
 
 
@@ -581,6 +586,13 @@ def fetch_trends(secid):
             _preclose_cache[tx_sym] = _pc
     except (ValueError, TypeError, AttributeError):
         pass
+    # qt 实时块经常缺失昨收 → 回退日K昨收兜底（fetch_kline 内部会把 pc 写入缓存），
+    # 确保分时图百分比轴一定有基准，避免前端 %轴因 preClose=null 被跳过
+    if _preclose_cache.get(secid) is None:
+        try:
+            fetch_kline(secid, "101")
+        except Exception:
+            pass
 
     inner = node_obj.get("data") or {}
     rows = inner.get("data") if isinstance(inner, dict) else inner
@@ -1275,10 +1287,19 @@ def get_market_anomaly():
 
     events = sorted(_ANOM_EVENTS, key=lambda e: e.get("time_ts", 0), reverse=True)[:30]
 
+    # ---- 5) 上证日K（用于大盘异动面板的"日K"标签）----
+    kline_data = None
+    try:
+        kline_data = fetch_kline("1.000001", "101")
+    except Exception:
+        pass
+
     return {
         "trends": trends,
         "events": events,
         "movers": movers,
+        "preClose": _preclose_cache.get("1.000001"),
+        "kline": kline_data,
         "updated": now,
     }
 
@@ -2697,7 +2718,18 @@ class Handler(BaseHTTPRequestHandler):
             secid = (qs.get("secid") or [""])[0]
             klt = (qs.get("klt") or ["101"])[0]
             try:
-                self._json({"secid": secid, "klt": klt, "data": fetch_kline(secid, klt), "preClose": _preclose_cache.get(secid)})
+                kdata = fetch_kline(secid, klt)
+                pc = _preclose_cache.get(secid)
+                if pc is None:
+                    # 腾讯日K历史接口（fqkline）的 qt 实时块常缺昨收，preClose 会返回 null，
+                    # 导致前端 renderKline 的百分比轴被 `pre != null` 守卫掉而不显示。
+                    # 回退用分时实时 qt 补一次昨收（fetch_trends 会写入 _preclose_cache）。
+                    try:
+                        fetch_trends(secid)
+                        pc = _preclose_cache.get(secid)
+                    except Exception:
+                        pc = None
+                self._json({"secid": secid, "klt": klt, "data": kdata, "preClose": pc})
             except Exception as e:
                 self._json({"error": str(e)})
             return

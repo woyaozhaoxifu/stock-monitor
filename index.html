@@ -1006,8 +1006,19 @@ function switchAnomalyChart(mode) {
   anomalyChartMode = mode;
   document.getElementById("anomTabK").classList.toggle("active", mode === "kline");
   document.getElementById("anomTabT").classList.toggle("active", mode === "trends");
-  if (mode === "kline" && _anomalyKlineCache) {
-    renderAnomalyKline(_anomalyKlineCache);
+  if (mode === "kline") {
+    if (_anomalyKlineCache && _anomalyKlineCache.length >= 3) {
+      // 用当前 movers/events 作为异动标记
+      const anns = (window._lastAnomalyMovers || []);
+      // 推算日K昨收（倒数第二根 close）
+      const akPre = _anomalyKlineCache.length >= 2 ? _anomalyKlineCache[_anomalyKlineCache.length - 2].close : null;
+      renderAnomalyKline(_anomalyKlineCache, anns, akPre);
+    } else {
+      // 日K数据尚未就绪（首次加载或接口未返回），显示提示并触发一次加载
+      const el = document.getElementById("anomalyChart");
+      if (el) el.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--muted);font-size:12px">日K数据加载中…</div>';
+      loadMarketAnomaly();
+    }
   } else {
     loadMarketAnomaly();
   }
@@ -1017,10 +1028,16 @@ async function loadMarketAnomaly() {
   try {
     const r = await fetch("/api/market-anomaly", { cache: "no-store" });
     const d = await r.json();
+    // 缓存上证日K（用于"日K"标签切换）
+    if (d.kline && Array.isArray(d.kline) && d.kline.length >= 3) {
+      _anomalyKlineCache = d.kline;
+    }
+    // 缓存当前异动数据（用于日K模式的 markPoint 标记）
+    window._lastAnomalyMovers = anns;
     // 大盘异动面板默认展示「分时图」，板块异动直接叠加在分时图上（向外连线 + 标注）
     // 优先用 movers（当前领涨/领跌板块，盘中始终有内容）；兜底用 events 滚动事件流
     const anns = (d.movers && d.movers.length) ? d.movers : (d.events || []);
-    renderAnomalyChart(d.trends || [], anns);
+    renderAnomalyChart(d.trends || [], anns, d.preClose);
     renderAnomalyLog(anns);
     const hint = document.getElementById("anomalyHint");
     if (hint) hint.textContent = `${anns.length} 个板块异动 · 实时刷新`;
@@ -1035,7 +1052,7 @@ async function loadMarketAnomaly() {
   _anomalyTimer = setTimeout(loadMarketAnomaly, 15000);
 }
 
-function renderAnomalyChart(trends, events) {
+function renderAnomalyChart(trends, events, preClose) {
   const el = document.getElementById("anomalyChart");
   if (!el) return;
   if (!anomalyChart) {
@@ -1048,6 +1065,9 @@ function renderAnomalyChart(trends, events) {
 
   const times = trends.map(t => t.time);
   const prices = trends.map(t => t.price);
+  const pMin = Math.min.apply(null, prices), pMax = Math.max.apply(null, prices);
+  const pPad = (pMax - pMin) * 0.06 || 1;
+  const pLo = pMin - pPad, pHi = pMax + pPad;
   const vols = [];
   let prevPrice = 0;
   for (let i = 0; i < trends.length; i++) {
@@ -1070,8 +1090,8 @@ function renderAnomalyChart(trends, events) {
     const idx = timeToIndex(ev.time, times);
     if (idx < 0) return null;
     const up = ev.dir === "up";
-    const color = up ? "#16c784" : "#ff4d4f";        // 绿涨红跌
-    const bgColor = up ? "rgba(22,199,132,.88)" : "rgba(255,77,79,.88)";
+    const color = up ? "#ff4d4f" : "#16c784";        // 红涨绿跌（A股习惯）
+    const bgColor = up ? "rgba(255,77,79,.88)" : "rgba(22,199,132,.88)";
     const p = prices[idx];
     // 错位避免重叠：同方向标签按序号偏移
     const k = 1 + (i % 5) * 0.48;
@@ -1111,7 +1131,7 @@ function renderAnomalyChart(trends, events) {
       }
     },
     grid: [
-      { left: 48, right: 50, top: 14, height: "60%" },
+      { left: 48, right: 84, top: 14, height: "60%" },
       { left: 48, right: 50, top: "74%", height: "18%" }
     ],
     xAxis: [
@@ -1124,12 +1144,19 @@ function renderAnomalyChart(trends, events) {
         boundaryGap: false }
     ],
     yAxis: [
-      { scale: true, gridIndex: 0,
+      { scale: true, gridIndex: 0, min: pLo, max: pHi,
         splitLine: { lineStyle: { color: "#1f2730" } },
         axisLabel: { color: "#8b949e", fontSize: 10 },
         axisPointer: { label: { color: "#8b949e", fontSize: 10 } } },
       { scale: true, gridIndex: 1, splitNumber: 2,
-        axisLabel: { show: false }, splitLine: { show: false } }
+        axisLabel: { show: false }, splitLine: { show: false } },
+      ...(preClose && preClose > 0 ? [{
+        type: "value", gridIndex: 0, position: "right",
+        min: (pLo - preClose) / preClose * 100,
+        max: (pHi - preClose) / preClose * 100,
+        axisLabel: { color: "#8b949e", fontSize: 10, formatter: v => v.toFixed(2) + "%" },
+        axisLine: { show: false }, axisTick: { show: false }, splitLine: { show: false }
+      }] : [])
     ],
     dataZoom: [
       { type: "inside", xAxisIndex: [0, 1] },
@@ -1169,7 +1196,7 @@ function renderAnomalyChart(trends, events) {
 }
 
 /** 大盘异动面板 — 日K模式：上证指数蜡烛图 + 异动事件标记（标记在最新K线上） */
-function renderAnomalyKline(rows, events) {
+function renderAnomalyKline(rows, events, preClose) {
   const el = document.getElementById("anomalyChart");
   if (!el) return;
   if (!anomalyChart) {
@@ -1186,6 +1213,16 @@ function renderAnomalyKline(rows, events) {
   const x = rows.map(r => r.date);
   const candle = rows.map(r => [r.open, r.close, r.low, r.high]);
   const vols = rows.map(r => ({ value: r.vol, itemStyle: { color: r.close >= r.open ? "rgba(255,77,79,.55)" : "rgba(22,199,132,.55)" } }));
+
+  // 推算昨收（用于百分比轴）：优先用传入值，否则从日K数据取倒数第二根 close
+  if (preClose == null && rows.length >= 2) {
+    preClose = rows[rows.length - 2].close;
+  }
+  // 计算价格范围（用于对齐%轴）
+  const cMin = Math.min.apply(null, rows.map(r => r.low));
+  const cMax = Math.max.apply(null, rows.map(r => r.high));
+  const kpad = (cMax - cMin) * 0.04 || 0.01;
+  const kLo = cMin - kpad, kHi = cMax + kpad;
 
   // 异动事件作为 markPoint 标记在最新 K 线上
   const lastIdx = x.length - 1;
@@ -1218,17 +1255,22 @@ function renderAnomalyKline(rows, events) {
       textStyle: { color: "#e6edf3", fontSize: 12 },
       formatter: function(params) {
         if (!params || !params.length) return "";
-        const p = params[0];
-        if (p.seriesName === "上证指数") {
-          const d = candle[p.dataIndex] || [];
-          return `<b>${p.axisValue}</b><br/>开:${d[0]} 高:${d[3]}<br/>低:${d[2]} 收:${d[1]}`;
+        const p = params.find(z => z.seriesType === "candlestick") || params[0];
+        const d = candle[p.dataIndex] || [];
+        if (!d.length) return "";
+        const o = d[0], c = d[1], l = d[2], h = d[3];
+        const prev = p.dataIndex > 0 ? candle[p.dataIndex - 1][1] : o;
+        let pct = "";
+        if (prev && prev > 0 && c > 0) {
+          const v = (c - prev) / prev * 100, up = v >= 0, col = up ? "#ff4d4f" : "#16c784";
+          pct = `<br/>涨跌幅: <span style="color:${col}">${up ? "+" : ""}${v.toFixed(2)}%</span>`;
         }
-        return `<b>${p.axisValue}</b><br/>${p.seriesName}: <b>${p.data}</b>`;
+        return `<b>${p.axisValue}</b><br/>开:${o} 高:${h}<br/>低:${l} 收:${c}${pct}`;
       }
     },
     legend: { data: [{ name:"MA5",textStyle:{color:"#e6edf3"}},{ name:"MA10",textStyle:{color:"#f5c542"}},{ name:"MA20",textStyle:{color:"#b06cf0"}}], textStyle:{fontSize:11}, top:2, right:8, itemWidth:18, itemHeight:2, icon:"rect" },
     grid: [
-      { left: 48, right: 50, top: 18, height: "58%" },
+      { left: 48, right: 60, top: 18, height: "58%" },
       { left: 48, right: 50, top: "74%", height: "16%" }
     ],
     xAxis: [
@@ -1237,7 +1279,14 @@ function renderAnomalyKline(rows, events) {
     ],
     yAxis: [
       { scale: true, gridIndex: 0, splitLine: { lineStyle: { color: "#1f2730" } }, axisLabel: { color: "#8b949e", fontSize: 10 } },
-      { scale: true, gridIndex: 1, splitNumber: 2, axisLabel: { show: false }, splitLine: { show: false } }
+      { scale: true, gridIndex: 1, splitNumber: 2, axisLabel: { show: false }, splitLine: { show: false } },
+      {
+        type: "value", gridIndex: 0, position: "right",
+        min: preClose != null ? (kLo - preClose) / preClose * 100 : undefined,
+        max: preClose != null ? (kHi - preClose) / preClose * 100 : undefined,
+        axisLabel: { color: "#8b949e", fontSize: 10, formatter: v => v.toFixed(2) + "%" },
+        axisLine: { show: false }, axisTick: { show: false }, splitLine: { show: false }
+      }
     ],
     dataZoom: [
       { type: "inside", xAxisIndex: [0, 1] },
@@ -1883,7 +1932,23 @@ function renderInfoKline() {
   infoKlineChart.setOption({
     backgroundColor: "transparent", animation: false,
     legend: showIMA ? { data: [{ name: "MA5", itemStyle: { color: "#e6edf3" }, textStyle: { color: "#e6edf3" } }, { name: "MA10", itemStyle: { color: "#f5c542" }, textStyle: { color: "#f5c542" } }, { name: "MA20", itemStyle: { color: "#b06cf0" }, textStyle: { color: "#b06cf0" } }, { name: "MA60", itemStyle: { color: "#2ecc71" }, textStyle: { color: "#2ecc71" } }], textStyle: { fontSize: 11 }, top: 2, right: 8, itemWidth: 18, itemHeight: 2, icon: "rect" } : { show: false },
-    tooltip: { trigger: "axis", backgroundColor: "#1c2230", borderColor: "#2a3340", textStyle: { color: "#e6edf3" } },
+    tooltip: {
+      trigger: "axis", backgroundColor: "#1c2230", borderColor: "#2a3340", textStyle: { color: "#e6edf3" },
+      formatter: function (params) {
+        if (!params || !params.length) return "";
+        const p = params.find(z => z.seriesType === "candlestick") || params[0];
+        const d = candle[p.dataIndex] || [];
+        if (!d.length) return "";
+        const o = d[0], c = d[1], l = d[2], h = d[3];
+        let pct = "";
+        const pre = infoKlinePreClose;
+        if (pre != null && pre > 0 && c > 0) {
+          const v = (c - pre) / pre * 100, up = v >= 0, col = up ? "#ff4d4f" : "#16c784";
+          pct = `<br/>涨跌幅: <span style="color:${col}">${up ? "+" : ""}${v.toFixed(2)}%</span>`;
+        }
+        return `<b>${p.axisValue}</b><br/>开:${o} 高:${h}<br/>低:${l} 收:${c}${pct}`;
+      }
+    },
     axisPointer: { link: [{ xAxisIndex: "all" }] },
     grid: [{ left: 56, right: ipre != null ? 60 : 18, top: 30, height: "56%" }, { left: 56, right: 18, top: "74%", height: "17%" }],
     xAxis: [
@@ -2473,7 +2538,7 @@ function renderTrends() {
   const tSeries = { name: "趋势线", type: "line", data: segs, xAxisIndex: 0, yAxisIndex: 0, z: 5,
     showSymbol: false, lineStyle: { color: lineDrawColor, width: 2.0 }, tooltip: { show: false }, legendHoverLink: false };
   if (pendingPoint) tSeries.markPoint = { symbol: "circle", symbolSize: 9, itemStyle: { color: lineDrawColor }, label: { show: false }, data: [{ coord: [pendingPoint.date, pendingPoint.price] }] };
-  const pre = curTrendsPreClose;
+  const pre = (curTrendsPreClose != null) ? curTrendsPreClose : curKlinePreClose;
   const pLo = pMin - pad, pHi = pMax + pad;
   const priceAxis = { type: "value", min: pLo, max: pHi, position: "left",
     splitLine: { lineStyle: { color: "#1f2730" } }, axisLabel: { color: "#8b949e", fontSize: 11, formatter: v => v.toFixed(2) } };
@@ -2511,7 +2576,11 @@ function renderKline() {
   const cMin = Math.min.apply(null, closes), cMax = Math.max.apply(null, closes);
   const pad = (cMax - cMin) * 2.5 || 1;
   const segs = clampSegs(rawSegs, cMin - pad, cMax + pad);
-  const pre = curKlinePreClose;
+  // 昨收优先级：K线接口返回的 preClose → 分时接口 preClose → 从 K线数据本身取「倒数第二根收盘」兜底
+  // （倒数第二根收盘等同上一周期收盘，是最接近"昨收"的近似值，确保 %轴在无后端昨收时也必出）
+  const pre = (curKlinePreClose != null) ? curKlinePreClose
+            : (curTrendsPreClose != null ? curTrendsPreClose
+            : (rows.length >= 2 ? rows[rows.length - 2].close : null));
   const hi = Math.max.apply(null, rows.map(r => r.high)), lo = Math.min.apply(null, rows.map(r => r.low));
   const kpad = (hi - lo) * 0.04 || 0.01;
   const kLo = lo - kpad, kHi = hi + kpad;

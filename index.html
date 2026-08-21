@@ -1618,7 +1618,7 @@ async function doSearch() {
       await fetch("/api/add_watch", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({secid: el.dataset.secid})});
       searchResults.style.display = "none"; searchInput.value = ""; load();
     }));
-  } catch (e) { searchResults.style.display = "none"; }
+  } catch (e) { searchResults.innerHTML = '<div class="sr">搜索出错，请重试或检查网络：' + (e && e.message ? e.message : e) + '</div>'; searchResults.style.display = "block"; }
 }
 document.getElementById("searchBtn").addEventListener("click", doSearch);
 searchInput.addEventListener("keydown", e => { if (e.key === "Enter") doSearch(); });
